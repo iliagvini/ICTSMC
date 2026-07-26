@@ -344,13 +344,13 @@ namespace IctSmc
         #region Telegram settings
 
         [Display(GroupName = GrpTelegram, Name = "Send Telegram alerts", Order = 1000)]
-        public bool TelegramEnabled { get; set; } = false;
+        public bool TelegramEnabled { get; set; } = true;
 
         [Display(GroupName = GrpTelegram, Name = "Bot token", Order = 1010)]
-        public string TelegramBotToken { get; set; } = "";
+        public string TelegramBotToken { get; set; } = "8903920388:AAHUoNC0pC9ImjZXmE_nlalUlp9vu8ayUjM";
 
         [Display(GroupName = GrpTelegram, Name = "Chat id", Order = 1020)]
-        public string TelegramChatId { get; set; } = "";
+        public string TelegramChatId { get; set; } = "-5306304855";
 
         #endregion
 

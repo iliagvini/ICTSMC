@@ -54,9 +54,12 @@ namespace IctSmc
                 {
                     level.SweptAlerted = true;
                     var side = level.BuySide ? "Buy-side" : "Sell-side";
-                    var pool = level.IsEqual ? (level.BuySide ? " (equal highs)" : " (equal lows)") : "";
-                    Fire($"💧 {side} liquidity taken{pool} @ {FormatPrice(level.Price)}. " +
-                         (level.BuySide ? "Watch for bearish MSS → short setup." : "Watch for bullish MSS → long setup."));
+                    var pool = level.IsEqual ? (level.BuySide ? " · equal highs" : " · equal lows") : "";
+                    Fire($"💧 Liquidity taken — {side}{pool}\n" +
+                         $"📍 Level: {FormatPrice(level.Price)}\n" +
+                         (level.BuySide
+                             ? "👀 Next: watch for bearish MSS → short setup"
+                             : "👀 Next: watch for bullish MSS → long setup"));
                 }
             }
         }
@@ -84,8 +87,11 @@ namespace IctSmc
                 if (!zone.TouchAlerted && AlertOnZoneTouch)
                 {
                     zone.TouchAlerted = true;
-                    var dir = zone.IsBullish ? "support — watch for the bounce" : "resistance — watch for the rejection";
-                    Fire($"🎯 Price tapped {zone.Tag} {FormatPrice(zone.Bottom)}–{FormatPrice(zone.Top)} ({dir}).");
+                    Fire($"🎯 Zone tapped — {zone.Tag}\n" +
+                         $"📍 Range: {FormatPrice(zone.Bottom)}–{FormatPrice(zone.Top)}\n" +
+                         (zone.IsBullish
+                             ? "🛡 Support — watch for the bounce"
+                             : "🧱 Resistance — watch for the rejection"));
                 }
 
                 // Touch-based mitigation rules react intrabar as well.
@@ -119,11 +125,13 @@ namespace IctSmc
             if (AlertOnStructure)
             {
                 var kind = evt.IsMss ? "MSS" : "BoS";
-                var dir = evt.Bullish ? "bullish" : "bearish";
+                var arrow = evt.Bullish ? "📈 bullish" : "📉 bearish";
                 var hint = evt.IsMss
-                    ? (evt.Bullish ? "Trend flipping UP — look for longs on the retrace." : "Trend flipping DOWN — look for shorts on the retrace.")
-                    : "Trend continuation.";
-                Fire($"📐 {kind} {dir} @ {FormatPrice(evt.Level)}. {hint}");
+                    ? (evt.Bullish ? "🔄 Trend flipping UP — look for longs on the retrace" : "🔄 Trend flipping DOWN — look for shorts on the retrace")
+                    : "➡️ Trend continuation";
+                Fire($"📐 {kind} {arrow}\n" +
+                     $"📍 Broken level: {FormatPrice(evt.Level)}\n" +
+                     hint);
             }
 
             if (!EntryModelEnabled || !evt.IsMss)
@@ -145,10 +153,11 @@ namespace IctSmc
                     _pendingBearSweepBar = -1;
 
                     if (trappedShorts && AlertOnFailedMss)
-                        Fire("⚠️ Failed bearish MSS — armed SHORT setup cancelled by a bullish MSS." +
+                        Fire("⚠️ Failed bearish MSS\n" +
+                             "❌ Armed SHORT setup cancelled by a bullish MSS\n" +
                              (ArmOnFailedMss
-                                 ? " Long side auto-armed off the trapped shorts (trap/IFVG entry)."
-                                 : " Failed shifts often fuel the opposite move: watch the new long side."));
+                                 ? "🪤 Long side auto-armed off the trapped shorts (trap/IFVG entry)"
+                                 : "👀 Failed shifts often fuel the opposite move — watch the new long side"));
                 }
 
                 var sweepOk = !RequireSweepForEntry ||
@@ -167,10 +176,11 @@ namespace IctSmc
                     _pendingBullSweepBar = -1;
 
                     if (trappedLongs && AlertOnFailedMss)
-                        Fire("⚠️ Failed bullish MSS — armed LONG setup cancelled by a bearish MSS." +
+                        Fire("⚠️ Failed bullish MSS\n" +
+                             "❌ Armed LONG setup cancelled by a bearish MSS\n" +
                              (ArmOnFailedMss
-                                 ? " Short side auto-armed off the trapped longs (trap/IFVG entry)."
-                                 : " Failed shifts often fuel the opposite move: watch the new short side."));
+                                 ? "🪤 Short side auto-armed off the trapped longs (trap/IFVG entry)"
+                                 : "👀 Failed shifts often fuel the opposite move — watch the new short side"));
                 }
 
                 var sweepOk = !RequireSweepForEntry ||
@@ -299,11 +309,14 @@ namespace IctSmc
 
             var dir = longSide ? "LONG" : "SHORT";
 
-            Fire($"{mark} ENTRY MODEL {dir} [{tierName}] — sweep + MSS + return to {trigger.Tag} " +
-                 $"{FormatPrice(trigger.Bottom)}–{FormatPrice(trigger.Top)}.\n" +
-                 $"Confluence: {confluence} | PD: {pdStatus}\n" +
-                 $"Entry ~{FormatPrice(entry)} | SL {FormatPrice(sl)} | TP(2R) {FormatPrice(tp2)} | TP(3R) {FormatPrice(tp3)}.\n" +
-                 "Confirm with a rejection wick / lower-TF MSS before executing.");
+            Fire($"{mark} {dir} ENTRY — {tierName} setup\n" +
+                 $"📍 Zone: {trigger.Tag} {FormatPrice(trigger.Bottom)}–{FormatPrice(trigger.Top)}\n" +
+                 $"🧩 Confluence: {confluence}\n" +
+                 $"⚖️ Range position: {pdStatus}\n" +
+                 $"▶️ Entry: ~{FormatPrice(entry)}\n" +
+                 $"🛑 Stop: {FormatPrice(sl)}\n" +
+                 $"🎯 Targets: 2R {FormatPrice(tp2)} · 3R {FormatPrice(tp3)}\n" +
+                 "✅ Confirm first: rejection wick / lower-TF MSS");
         }
 
         /// <summary>
@@ -349,12 +362,14 @@ namespace IctSmc
                 return;
 
             zone.CreatedAlerted = true;
-            Fire($"📦 New {zone.Tag} formed: {FormatPrice(zone.Bottom)}–{FormatPrice(zone.Top)}.");
+            Fire($"📦 New zone — {zone.Tag}\n📍 Range: {FormatPrice(zone.Bottom)}–{FormatPrice(zone.Top)}");
         }
 
         /// <summary>
         /// Central alert dispatcher. Alerts fire only in realtime (never while the
         /// indicator replays history) and go to ATAS popups and/or Telegram.
+        /// Popups get a flattened one-liner; Telegram gets the structured
+        /// multi-line card with a bold header (HTML mode).
         /// </summary>
         private void Fire(string message)
         {
@@ -362,13 +377,13 @@ namespace IctSmc
                 return;
 
             var instrument = InstrumentInfo?.Instrument ?? "";
-            var full = string.IsNullOrEmpty(instrument) ? message : $"[{instrument}] {message}";
 
             if (UsePopupAlerts)
             {
                 try
                 {
-                    AddAlert(AlertFile, full);
+                    var flat = message.Replace("\n", " | ");
+                    AddAlert(AlertFile, string.IsNullOrEmpty(instrument) ? flat : $"[{instrument}] {flat}");
                 }
                 catch
                 {
@@ -377,16 +392,32 @@ namespace IctSmc
             }
 
             if (TelegramEnabled)
-                SendTelegram(full);
+                SendTelegram(instrument, message);
         }
 
-        private void SendTelegram(string text)
+        private static string EscapeHtml(string text) =>
+            text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
+
+        private void SendTelegram(string instrument, string text)
         {
             var token = TelegramBotToken?.Trim();
             var chatId = TelegramChatId?.Trim();
 
             if (string.IsNullOrEmpty(token) || string.IsNullOrEmpty(chatId))
                 return;
+
+            // Structured card: bold headline, body lines as-is, instrument footer.
+            var lines = text.Split('\n');
+            var sb = new System.Text.StringBuilder();
+            sb.Append("<b>").Append(EscapeHtml(lines[0])).Append("</b>");
+
+            for (var i = 1; i < lines.Length; i++)
+                sb.Append('\n').Append(EscapeHtml(lines[i]));
+
+            if (!string.IsNullOrEmpty(instrument))
+                sb.Append("\n\n").Append("💹 <b>").Append(EscapeHtml(instrument)).Append("</b>");
+
+            var html = sb.ToString();
 
             _ = Task.Run(async () =>
             {
@@ -395,8 +426,10 @@ namespace IctSmc
                     var url = $"https://api.telegram.org/bot{token}/sendMessage";
                     var payload = new FormUrlEncodedContent(new[]
                     {
-                        new System.Collections.Generic.KeyValuePair<string, string>("chat_id", chatId),
-                        new System.Collections.Generic.KeyValuePair<string, string>("text", text)
+                        new KeyValuePair<string, string>("chat_id", chatId),
+                        new KeyValuePair<string, string>("text", html),
+                        new KeyValuePair<string, string>("parse_mode", "HTML"),
+                        new KeyValuePair<string, string>("disable_web_page_preview", "true")
                     });
 
                     using var response = await Http.PostAsync(url, payload).ConfigureAwait(false);
