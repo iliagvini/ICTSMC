@@ -291,7 +291,7 @@ namespace IctSmc
         public decimal HtfDisplacementFactor { get; set; } = 1.3m;
 
         [Display(GroupName = GrpHtf, Name = "HTF zone border color", Order = 745)]
-        public Color HtfBorderColor { get; set; } = Color.FromArgb(0xFF, 0xCB, 0x91, 0xD8);
+        public Color HtfBorderColor { get; set; } = Color.FromArgb(0xFF, 0x61, 0x69, 0x69);
 
         [Display(GroupName = GrpHtf, Name = "Max HTF zones per layer", Order = 750)]
         [Range(1, 100)]

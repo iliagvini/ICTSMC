@@ -146,7 +146,7 @@ namespace IctSmc
                 {
                     // HTF zones are frames, not fills — they outline confluence
                     // without stacking paint over the LTF zones inside them.
-                    // Same 1px weight as LTF borders; the gold hue alone marks HTF.
+                    // Same 1px weight as LTF borders; the dedicated hue alone marks HTF.
                     context.DrawRectangle(new RenderPen(Color.FromArgb(220, HtfBorderColor), 1), rect);
                 }
                 else
@@ -270,10 +270,11 @@ namespace IctSmc
                 if (x2 <= x1)
                     continue;
 
+                // One line style for ALL liquidity levels — EQH/EQL pools are
+                // distinguished by their label alone, not by stroke weight.
                 var color = level.BuySide ? BslColor : SslColor;
                 var alpha = level.Swept ? 70 : 170;
-                var width = level.IsEqual ? 2 : 1;
-                var pen = new RenderPen(Color.FromArgb(alpha, color), width, DashStyle.Dash);
+                var pen = new RenderPen(Color.FromArgb(alpha, color), 1, DashStyle.Dash);
 
                 if (!level.Swept)
                 {
@@ -319,11 +320,10 @@ namespace IctSmc
                 x1 = Math.Max(x1, region.Left);
                 x2 = Math.Min(x2, region.Right);
 
-                // `---- BoS ----` / `---- MSS ----`: dashed line split around the
-                // bare centered label. MSS keeps a heavier, brighter stroke.
+                // `---- BoS ----` / `---- MSS ----`: identical dashed 1px style for
+                // both — the label text alone tells them apart.
                 var color = evt.Bullish ? BullStructureColor : BearStructureColor;
-                var pen = new RenderPen(Color.FromArgb(evt.IsMss ? 230 : 150, color),
-                    evt.IsMss ? 2 : 1, DashStyle.Dash);
+                var pen = new RenderPen(Color.FromArgb(150, color), 1, DashStyle.Dash);
 
                 DrawLabeledLine(context, pen, evt.IsMss ? "MSS" : "BoS",
                     Color.FromArgb(240, color), x1, x2, y, region);
