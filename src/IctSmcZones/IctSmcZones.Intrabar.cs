@@ -50,6 +50,9 @@ namespace IctSmc
                 else
                     _pendingBullSweepBar = bar;
 
+                JournalEvent(bar, "LiquiditySweep", level.BuySide ? "BuySide" : "SellSide", null, level.Price,
+                    level.IsEqual ? "Equal highs/lows pool" : "");
+
                 if (!level.SweptAlerted && AlertOnSweep)
                 {
                     level.SweptAlerted = true;
@@ -83,6 +86,12 @@ namespace IctSmc
 
                 if (zone.State == ZoneState.Active)
                     zone.State = ZoneState.Touched;
+
+                if (!zone.TouchLogged)
+                {
+                    zone.TouchLogged = true;
+                    JournalEvent(bar, "ZoneTouch", zone.IsBullish ? "Bull" : "Bear", zone, GetCandle(bar).Close, "");
+                }
 
                 if (!zone.TouchAlerted && AlertOnZoneTouch)
                 {
@@ -122,6 +131,8 @@ namespace IctSmc
 
         private void OnStructureEvent(StructureEvent evt)
         {
+            JournalEvent(evt.Bar, evt.IsMss ? "MSS" : "BoS", evt.Bullish ? "Bull" : "Bear", null, evt.Level, "");
+
             if (AlertOnStructure)
             {
                 var kind = evt.IsMss ? "MSS" : "BoS";
@@ -152,6 +163,10 @@ namespace IctSmc
                     _armedBearUntil = -1;
                     _pendingBearSweepBar = -1;
 
+                    if (trappedShorts)
+                        JournalEvent(evt.Bar, "FailedMSS", "Bear", null, evt.Level,
+                            ArmOnFailedMss ? "Short cancelled; long trap-armed" : "Short cancelled");
+
                     if (trappedShorts && AlertOnFailedMss)
                         Fire("⚠️ Failed bearish MSS\n" +
                              "❌ Armed SHORT setup cancelled by a bullish MSS\n" +
@@ -160,10 +175,16 @@ namespace IctSmc
                                  : "👀 Failed shifts often fuel the opposite move — watch the new long side"));
                 }
 
-                var sweepOk = !RequireSweepForEntry ||
-                              (_pendingBullSweepBar > 0 && evt.Bar - _pendingBullSweepBar <= SweepToMssWindow);
+                var hadSweep = _pendingBullSweepBar > 0 && evt.Bar - _pendingBullSweepBar <= SweepToMssWindow;
+                var sweepOk = !RequireSweepForEntry || hadSweep;
                 if (sweepOk || (ArmOnFailedMss && trappedShorts))
+                {
                     _armedBullUntil = evt.Bar + ArmWindowBars;
+                    _armedBullSource = hadSweep && trappedShorts ? "Sweep+Trap"
+                        : hadSweep ? "Sweep"
+                        : trappedShorts ? "TrapArm"
+                        : "MSS-only";
+                }
             }
             else
             {
@@ -175,6 +196,10 @@ namespace IctSmc
                     _armedBullUntil = -1;
                     _pendingBullSweepBar = -1;
 
+                    if (trappedLongs)
+                        JournalEvent(evt.Bar, "FailedMSS", "Bull", null, evt.Level,
+                            ArmOnFailedMss ? "Long cancelled; short trap-armed" : "Long cancelled");
+
                     if (trappedLongs && AlertOnFailedMss)
                         Fire("⚠️ Failed bullish MSS\n" +
                              "❌ Armed LONG setup cancelled by a bearish MSS\n" +
@@ -183,10 +208,16 @@ namespace IctSmc
                                  : "👀 Failed shifts often fuel the opposite move — watch the new short side"));
                 }
 
-                var sweepOk = !RequireSweepForEntry ||
-                              (_pendingBearSweepBar > 0 && evt.Bar - _pendingBearSweepBar <= SweepToMssWindow);
+                var hadSweep = _pendingBearSweepBar > 0 && evt.Bar - _pendingBearSweepBar <= SweepToMssWindow;
+                var sweepOk = !RequireSweepForEntry || hadSweep;
                 if (sweepOk || (ArmOnFailedMss && trappedLongs))
+                {
                     _armedBearUntil = evt.Bar + ArmWindowBars;
+                    _armedBearSource = hadSweep && trappedLongs ? "Sweep+Trap"
+                        : hadSweep ? "Sweep"
+                        : trappedLongs ? "TrapArm"
+                        : "MSS-only";
+                }
             }
         }
 
@@ -231,9 +262,11 @@ namespace IctSmc
 
                 if (matches.Count > 0)
                 {
+                    var source = _armedBullSource;
                     _armedBullUntil = -1;
                     _pendingBullSweepBar = -1;
-                    EmitEntrySignal(matches, longSide: true, eq, tolerance);
+                    _armedBullSource = "";
+                    EmitEntrySignal(matches, longSide: true, eq, tolerance, source, bar);
                 }
             }
 
@@ -248,18 +281,17 @@ namespace IctSmc
 
                 if (matches.Count > 0)
                 {
+                    var source = _armedBearSource;
                     _armedBearUntil = -1;
                     _pendingBearSweepBar = -1;
-                    EmitEntrySignal(matches, longSide: false, eq, tolerance);
+                    _armedBearSource = "";
+                    EmitEntrySignal(matches, longSide: false, eq, tolerance, source, bar);
                 }
             }
         }
 
-        private void EmitEntrySignal(List<Zone> matches, bool longSide, decimal? eq, decimal tolerance)
+        private void EmitEntrySignal(List<Zone> matches, bool longSide, decimal? eq, decimal tolerance, string armSource, int bar)
         {
-            if (!AlertOnEntry)
-                return;
-
             // The trigger zone is the one price physically touched first
             // (highest top for a falling tap, lowest bottom for a rising one);
             // the trade plan is built from it so the stop stays structural and tight.
@@ -308,6 +340,32 @@ namespace IctSmc
             }
 
             var dir = longSide ? "LONG" : "SHORT";
+
+            JournalSignal(new SignalRecord
+            {
+                Id = ++_nextSignalId,
+                Time = BarTime(bar),
+                Live = _realtime,
+                Long = longSide,
+                Tier = tierName,
+                ArmSource = string.IsNullOrEmpty(armSource) ? "Unknown" : armSource,
+                TriggerTag = trigger.Tag,
+                TriggerType = trigger.Type,
+                TriggerHtf = trigger.IsHtf,
+                Layer = trigger.IsHtf ? trigger.HtfLabel : "LTF",
+                ZoneTop = trigger.Top,
+                ZoneBottom = trigger.Bottom,
+                Entry = entry,
+                Sl = sl,
+                Tp2 = tp2,
+                Tp3 = tp3,
+                PdStatus = pdStatus,
+                Confluence = confluence,
+                SignalBar = bar
+            });
+
+            if (!AlertOnEntry)
+                return;
 
             Fire($"{mark} {dir} ENTRY — {tierName} setup\n" +
                  $"📍 Zone: {trigger.Tag} {FormatPrice(trigger.Bottom)}–{FormatPrice(trigger.Top)}\n" +

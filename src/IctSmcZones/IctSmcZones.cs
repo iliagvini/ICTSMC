@@ -72,10 +72,23 @@ namespace IctSmc
         private int _pendingBearSweepBar = -1;  // buy-side liquidity was swept (short setup precursor)
         private int _armedBullUntil = -1;
         private int _armedBearUntil = -1;
+        private string _armedBullSource = "";   // "Sweep" / "TrapArm" / "Sweep+Trap" / "MSS-only"
+        private string _armedBearSource = "";
 
         #endregion
 
         #region General settings
+
+        [Display(GroupName = GrpGeneral, Name = "Display mode", Order = 90)]
+        public DisplayMode DisplayMode { get; set; } = DisplayMode.Clean;
+
+        [Display(GroupName = GrpGeneral, Name = "Visible zones per side (Clean mode)", Order = 92)]
+        [Range(1, 20)]
+        public int MaxVisibleZonesPerSide { get; set; } = 4;
+
+        [Display(GroupName = GrpGeneral, Name = "Zone visibility range (ATR ×, 0 = all)", Order = 94)]
+        [Range(0, 100)]
+        public int ZoneVisibilityAtrRange { get; set; } = 8;
 
         [Display(GroupName = GrpGeneral, Name = "Swing period (fractal strength)", Order = 100)]
         [Range(2, 20)]
@@ -89,12 +102,12 @@ namespace IctSmc
         [Range(1, 200)]
         public int MaxZonesPerType { get; set; } = 25;
 
-        [Display(GroupName = GrpGeneral, Name = "Show mitigated zones (faded)", Order = 130)]
-        public bool ShowMitigated { get; set; } = true;
+        [Display(GroupName = GrpGeneral, Name = "Show mitigated zones (review only)", Order = 130)]
+        public bool ShowMitigated { get; set; } = false;
 
-        [Display(GroupName = GrpGeneral, Name = "Keep mitigated zones (bars)", Order = 140)]
-        [Range(0, 5000)]
-        public int KeepMitigatedBars { get; set; } = 300;
+        [Display(GroupName = GrpGeneral, Name = "Keep mitigated zones in data (bars)", Order = 140)]
+        [Range(5, 5000)]
+        public int KeepMitigatedBars { get; set; } = 10;
 
         #endregion
 
@@ -102,6 +115,10 @@ namespace IctSmc
 
         [Display(GroupName = GrpStructure, Name = "Show BoS / MSS", Order = 200)]
         public bool ShowStructure { get; set; } = true;
+
+        [Display(GroupName = GrpStructure, Name = "Max structure labels on chart", Order = 205)]
+        [Range(1, 100)]
+        public int MaxStructureLabels { get; set; } = 8;
 
         [Display(GroupName = GrpStructure, Name = "Bullish structure color", Order = 210)]
         public Color BullStructureColor { get; set; } = Color.FromArgb(255, 38, 166, 91);
@@ -184,6 +201,10 @@ namespace IctSmc
         [Range(1, 50)]
         public int MaxLiquidityPerSide { get; set; } = 8;
 
+        [Display(GroupName = GrpLiq, Name = "Keep swept levels visible (bars)", Order = 525)]
+        [Range(0, 1000)]
+        public int SweptRetentionBars { get; set; } = 40;
+
         [Display(GroupName = GrpLiq, Name = "Buy-side liquidity color", Order = 530)]
         public Color BslColor { get; set; } = Color.FromArgb(255, 192, 57, 43);
 
@@ -194,8 +215,11 @@ namespace IctSmc
 
         #region Premium/Discount settings
 
-        [Display(GroupName = GrpPd, Name = "Show premium/discount", Order = 600)]
+        [Display(GroupName = GrpPd, Name = "Show equilibrium line", Order = 600)]
         public bool ShowPremiumDiscount { get; set; } = true;
+
+        [Display(GroupName = GrpPd, Name = "Shade premium/discount halves", Order = 605)]
+        public bool PdShadingEnabled { get; set; } = false;
 
         [Display(GroupName = GrpPd, Name = "Premium shade color", Order = 610)]
         public Color PremiumColor { get; set; } = Color.FromArgb(255, 231, 76, 60);
@@ -418,6 +442,9 @@ namespace IctSmc
             _pendingBearSweepBar = -1;
             _armedBullUntil = -1;
             _armedBearUntil = -1;
+            _armedBullSource = "";
+            _armedBearSource = "";
+            InitJournalSession();
         }
 
         private decimal TickSize => InstrumentInfo?.TickSize ?? 0.01m;

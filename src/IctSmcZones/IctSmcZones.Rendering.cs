@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Linq;
@@ -8,6 +9,13 @@ using OFT.Rendering.Tools;
 
 namespace IctSmc
 {
+    /// <summary>
+    /// Live-trading rendering. Philosophy: the chart shows only what is tradeable
+    /// RIGHT NOW — mitigated objects vanish, zones stop at the live candle instead
+    /// of smearing to the right edge, and Clean mode culls anything far from price.
+    /// The full detection state lives on underneath (alerts, entry model and the
+    /// journal all see everything); rendering is just the visible slice of it.
+    /// </summary>
     public partial class IctSmcZones
     {
         private static readonly RenderFont ZoneFont = new("Segoe UI", 8f);
@@ -16,8 +24,8 @@ namespace IctSmc
         private const int ActiveZoneAlpha = 46;
         private const int TouchedZoneAlpha = 30;
         private const int MitigatedZoneAlpha = 14;
-        private const int HtfExtraAlpha = 22;
         private const int PdShadeAlpha = 10;
+        private const int LabelBackdropAlpha = 150;
 
         protected override void OnRender(RenderContext context, DrawingLayouts layout)
         {
@@ -59,78 +67,144 @@ namespace IctSmc
 
         #region Zones
 
+        /// <summary>
+        /// Clean mode shows the nearest unmitigated zones per side within an ATR
+        /// budget (HTF zones get double range — a fresh Daily OB stays visible
+        /// longer). Detailed mode shows every unmitigated zone.
+        /// </summary>
+        private List<Zone> SelectVisibleZones(int lastBar)
+        {
+            IEnumerable<Zone> pool = _zones;
+
+            if (!ShowMitigated)
+                pool = pool.Where(z => z.State != ZoneState.Mitigated);
+
+            pool = pool.Where(z =>
+                (!z.IsOrderBlock || ShowOb) &&
+                (z.IsOrderBlock || ShowFvg));
+
+            if (DisplayMode == DisplayMode.Detailed)
+                return pool.ToList();
+
+            var price = GetCandle(lastBar).Close;
+            var budget = _atr > 0 && ZoneVisibilityAtrRange > 0
+                ? _atr * ZoneVisibilityAtrRange
+                : decimal.MaxValue;
+
+            decimal Distance(Zone z) => z.Contains(price)
+                ? 0m
+                : Math.Min(Math.Abs(price - z.Top), Math.Abs(price - z.Bottom));
+
+            var candidates = pool
+                .Where(z => z.State != ZoneState.Mitigated)
+                .Select(z => (Zone: z, Dist: Distance(z)))
+                .Where(t => t.Dist <= (t.Zone.IsHtf ? budget * 2 : budget))
+                .ToList();
+
+            var visible = new List<Zone>();
+
+            foreach (var bullish in new[] { true, false })
+            {
+                var side = candidates.Where(t => t.Zone.IsBullish == bullish)
+                                     .OrderBy(t => t.Dist)
+                                     .ToList();
+
+                // Separate budgets so LTF triggers never crowd out the HTF map.
+                visible.AddRange(side.Where(t => !t.Zone.IsHtf).Take(MaxVisibleZonesPerSide).Select(t => t.Zone));
+                visible.AddRange(side.Where(t => t.Zone.IsHtf).Take(MaxVisibleZonesPerSide).Select(t => t.Zone));
+            }
+
+            return visible;
+        }
+
         private void RenderZones(RenderContext context, Rectangle region, int lastBar)
         {
-            // HTF zones are painted first so chart-TF zones sit crisply on top of
-            // them — stacked confluence reads as layers instead of a color soup.
-            foreach (var zone in _zones.OrderByDescending(z => z.IsHtf).ThenBy(z => z.StartBar))
+            var visible = SelectVisibleZones(lastBar);
+            if (visible.Count == 0)
+                return;
+
+            // Zones stop one bar past the live candle — they track price, never
+            // smear across the screen.
+            var xLast = ChartInfo.GetXByBar(lastBar, false);
+            var barWidth = lastBar > 0 ? Math.Max(2, xLast - ChartInfo.GetXByBar(lastBar - 1, false)) : 4;
+            var xLive = Math.Min(region.Right, xLast + barWidth * 2);
+
+            // HTF frames first, LTF fills on top — confluence reads as layers.
+            foreach (var zone in visible.OrderByDescending(z => z.IsHtf).ThenBy(z => z.StartBar))
             {
-                if (zone.IsOrderBlock && !ShowOb)
-                    continue;
-                if (!zone.IsOrderBlock && !ShowFvg)
-                    continue;
-                if (zone.State == ZoneState.Mitigated && !ShowMitigated)
-                    continue;
-
-                var endBar = zone.EndBar ?? lastBar;
-
                 var x1 = ChartInfo.GetXByBar(zone.StartBar, false);
                 var x2 = zone.EndBar.HasValue
-                    ? ChartInfo.GetXByBar(endBar, false)
-                    : region.Right; // live zones stretch to the right edge — responsive as bars shift
+                    ? Math.Min(ChartInfo.GetXByBar(zone.EndBar.Value, false), xLive)
+                    : xLive;
 
                 var y1 = ChartInfo.GetYByPrice(zone.Top, false);
                 var y2 = ChartInfo.GetYByPrice(zone.Bottom, false);
 
-                // Clip to the visible chart region.
                 x1 = Math.Max(x1, region.Left);
                 x2 = Math.Min(x2, region.Right);
                 if (x2 <= x1 || Math.Max(y1, y2) < region.Top || Math.Min(y1, y2) > region.Bottom)
                     continue;
 
                 var baseColor = ZoneColor(zone);
-                var alpha = zone.State switch
-                {
-                    ZoneState.Mitigated => MitigatedZoneAlpha,
-                    ZoneState.Touched => TouchedZoneAlpha,
-                    _ => ActiveZoneAlpha
-                };
-
-                if (zone.IsHtf && zone.State != ZoneState.Mitigated)
-                    alpha += HtfExtraAlpha;
-
-                // Min height 2 px so zoomed-out zones stay visible as crisp strips.
                 var rect = new Rectangle(x1, Math.Min(y1, y2), x2 - x1, Math.Max(2, Math.Abs(y2 - y1)));
 
-                context.FillRectangle(Color.FromArgb(alpha, baseColor), rect);
-
-                // HTF zones carry a distinct gold border so LTF vs HTF is readable
-                // at any zoom level, independent of the fill hue.
-                var borderColor = zone.IsHtf ? HtfBorderColor : baseColor;
-                var borderAlpha = zone.State == ZoneState.Mitigated ? 60 : zone.IsHtf ? 200 : 160;
-                var borderPen = new RenderPen(Color.FromArgb(borderAlpha, borderColor), zone.IsHtf ? 2 : 1);
-                context.DrawRectangle(borderPen, rect);
-
-                // Midline (consequent encroachment) — only when there is room for it.
-                if (zone.State != ZoneState.Mitigated && rect.Width >= 14 && rect.Height >= 8)
+                if (zone.IsHtf)
                 {
-                    var midY = ChartInfo.GetYByPrice(zone.Mid, false);
-                    if (midY > region.Top && midY < region.Bottom)
+                    // HTF zones are frames, not fills — they outline confluence
+                    // without stacking paint over the LTF zones inside them.
+                    var framePen = new RenderPen(Color.FromArgb(210, HtfBorderColor), 2);
+                    context.DrawRectangle(framePen, rect);
+
+                    var innerPen = new RenderPen(Color.FromArgb(90, baseColor), 1);
+                    context.DrawRectangle(innerPen, Rectangle.Inflate(rect, -2, -2));
+                }
+                else
+                {
+                    var alpha = zone.State switch
                     {
-                        var midPen = new RenderPen(Color.FromArgb(70, baseColor), 1, DashStyle.Dot);
-                        context.DrawLine(midPen, x1, midY, x2, midY);
+                        ZoneState.Mitigated => MitigatedZoneAlpha,
+                        ZoneState.Touched => TouchedZoneAlpha,
+                        _ => ActiveZoneAlpha
+                    };
+
+                    context.FillRectangle(Color.FromArgb(alpha, baseColor), rect);
+                    context.DrawRectangle(new RenderPen(Color.FromArgb(160, baseColor), 1), rect);
+
+                    // Midline (consequent encroachment) when there is room.
+                    if (zone.State != ZoneState.Mitigated && rect.Width >= 14 && rect.Height >= 8)
+                    {
+                        var midY = ChartInfo.GetYByPrice(zone.Mid, false);
+                        if (midY > region.Top && midY < region.Bottom)
+                            context.DrawLine(new RenderPen(Color.FromArgb(70, baseColor), 1, DashStyle.Dot),
+                                x1, midY, x2, midY);
                     }
                 }
 
-                // Label only when it genuinely fits inside the zone — zoomed-out
-                // charts stay clean instead of collecting orphaned text.
-                if (zone.State != ZoneState.Mitigated)
-                {
-                    var size = context.MeasureString(zone.Tag, ZoneFont);
-                    if (rect.Width >= size.Width + 8 && rect.Height >= size.Height + 2)
-                        context.DrawString(zone.Tag, ZoneFont, Color.FromArgb(220, baseColor), x1 + 4, rect.Top + 2);
-                }
+                DrawCenteredZoneLabel(context, zone, rect, baseColor);
             }
+        }
+
+        /// <summary>
+        /// Zone tag precisely centered (both axes) on a translucent backdrop pill,
+        /// auto-hidden whenever the zone is too small to host it cleanly.
+        /// </summary>
+        private void DrawCenteredZoneLabel(RenderContext context, Zone zone, Rectangle rect, Color baseColor)
+        {
+            if (zone.State == ZoneState.Mitigated)
+                return;
+
+            var size = context.MeasureString(zone.Tag, ZoneFont);
+            if (rect.Width < size.Width + 10 || rect.Height < size.Height + 4)
+                return;
+
+            var textX = rect.Left + (rect.Width - size.Width) / 2;
+            var textY = rect.Top + (rect.Height - size.Height) / 2;
+
+            var pill = new Rectangle(textX - 4, textY - 1, size.Width + 8, size.Height + 2);
+            context.FillRectangle(Color.FromArgb(LabelBackdropAlpha, 12, 12, 12), pill);
+
+            var labelColor = zone.IsHtf ? HtfBorderColor : baseColor;
+            context.DrawString(zone.Tag, ZoneFont, Color.FromArgb(240, labelColor), textX, textY);
         }
 
         private Color ZoneColor(Zone zone) => zone.Type switch
@@ -151,6 +225,12 @@ namespace IctSmc
         {
             foreach (var level in _liquidity)
             {
+                // Swept liquidity is history — it fades out after a short window.
+                if (level.Swept && level.SweptBar.HasValue &&
+                    DisplayMode == DisplayMode.Clean &&
+                    lastBar - level.SweptBar.Value > SweptRetentionBars)
+                    continue;
+
                 var y = ChartInfo.GetYByPrice(level.Price, false);
                 if (y < region.Top || y > region.Bottom)
                     continue;
@@ -166,24 +246,23 @@ namespace IctSmc
                 var color = level.BuySide ? BslColor : SslColor;
                 var alpha = level.Swept ? 70 : 170;
                 var width = level.IsEqual ? 2 : 1;
-                var pen = new RenderPen(Color.FromArgb(alpha, color), width, DashStyle.Dash);
 
-                context.DrawLine(pen, x1, y, x2, y);
-
-                var label = level.BuySide
-                    ? (level.IsEqual ? "EQH · BSL" : "BSL")
-                    : (level.IsEqual ? "EQL · SSL" : "SSL");
+                context.DrawLine(new RenderPen(Color.FromArgb(alpha, color), width, DashStyle.Dash), x1, y, x2, y);
 
                 if (!level.Swept)
                 {
                     if (x2 - x1 >= 40)
+                    {
+                        var label = level.BuySide
+                            ? (level.IsEqual ? "EQH · BSL" : "BSL")
+                            : (level.IsEqual ? "EQL · SSL" : "SSL");
                         context.DrawString(label, ZoneFont, Color.FromArgb(200, color), x1 + 3,
                             level.BuySide ? y - 13 : y + 2);
+                    }
                 }
                 else if (level.SweptBar.HasValue && x2 - x1 >= 24)
                 {
-                    // Mark the exact sweep with an ✕ and note whether it trapped traders.
-                    var sweepTag = level.WasTrap == true ? "✕ sweep" : "✕ run";
+                    var sweepTag = level.WasTrap == true ? "x Sweep" : "x Run";
                     context.DrawString(sweepTag, StructureFont, Color.FromArgb(200, color),
                         x2 - 2, level.BuySide ? y - 14 : y + 2);
                 }
@@ -196,7 +275,13 @@ namespace IctSmc
 
         private void RenderStructure(RenderContext context, Rectangle region)
         {
-            foreach (var evt in _structure)
+            // Only the most recent events matter live; old structure is implied
+            // by the zones it produced.
+            var recent = _structure.Count > MaxStructureLabels
+                ? _structure.Skip(_structure.Count - MaxStructureLabels)
+                : _structure;
+
+            foreach (var evt in recent)
             {
                 var y = ChartInfo.GetYByPrice(evt.Level, false);
                 if (y < region.Top || y > region.Bottom)
@@ -233,7 +318,7 @@ namespace IctSmc
 
         private void RenderPremiumDiscount(RenderContext context, Rectangle region, int lastBar)
         {
-            // Same ordered dealing range the entry filter uses — the shading on the
+            // Same ordered dealing range the entry filter uses — the drawing on the
             // chart and the PD gate in the signal engine can never disagree.
             var range = GetDealingRange();
             if (!range.HasValue)
@@ -253,9 +338,11 @@ namespace IctSmc
             var yEq = ChartInfo.GetYByPrice(eq, false);
             var yLow = Math.Min(ChartInfo.GetYByPrice(low, false), region.Bottom);
 
-            if (yEq > region.Top && yEq < region.Bottom)
+            if (yEq <= region.Top || yEq >= region.Bottom)
+                return;
+
+            if (PdShadingEnabled)
             {
-                // Premium shading (upper half) and discount shading (lower half).
                 if (yEq > yHigh)
                     context.FillRectangle(Color.FromArgb(PdShadeAlpha, PremiumColor),
                         new Rectangle(x1, yHigh, x2 - x1, yEq - yHigh));
@@ -263,11 +350,11 @@ namespace IctSmc
                 if (yLow > yEq)
                     context.FillRectangle(Color.FromArgb(PdShadeAlpha, DiscountColor),
                         new Rectangle(x1, yEq, x2 - x1, yLow - yEq));
-
-                var eqPen = new RenderPen(Color.FromArgb(150, EquilibriumColor), 1, DashStyle.DashDot);
-                context.DrawLine(eqPen, x1, yEq, x2, yEq);
-                context.DrawString("EQ 50%", ZoneFont, Color.FromArgb(180, EquilibriumColor), x1 + 3, yEq + 2);
             }
+
+            context.DrawLine(new RenderPen(Color.FromArgb(150, EquilibriumColor), 1, DashStyle.DashDot),
+                x1, yEq, x2, yEq);
+            context.DrawString("EQ 50%", ZoneFont, Color.FromArgb(180, EquilibriumColor), x1 + 3, yEq + 2);
         }
 
         #endregion

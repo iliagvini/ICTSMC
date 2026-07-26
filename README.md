@@ -88,6 +88,24 @@ Copy `src/IctSmcZones/bin/Release/IctSmcZones.dll` into
   border on top of their type color; labels auto-hide when a zone is too small,
   so zooming out never leaves orphaned text
 
+## Journal / audit pipeline
+
+With journaling on (default), every session writes CSVs to
+`Documents\ATAS\ICTSMC-Journal\<instrument>\` (new file set per recalculation —
+no duplicate rows):
+
+- `*-events.csv` — zone created/touched/mitigated/inverted, sweeps, BoS/MSS, failed MSS
+- `*-signals.csv` — every entry signal with tier, arm source (Sweep / TrapArm /
+  Sweep+Trap), trigger zone, entry/SL/TP2/TP3, PD status, confluence stack
+- `*-outcomes.csv` — resolution per signal (SL / TP2 / TP3 / Timeout, conservative
+  SL-first on ambiguous bars), R-multiple, **MAE/MFE in R**, bars held
+- `*-analytics.csv` — win-rate & expectancy grouped by zone family (OB/FVG/iFVG),
+  layer (LTF/4H/D…), arm source, tier, direction — answers "does TrapArm beat Sweep?"
+  and "which zones hit best?" directly
+
+Rows are flagged `LIVE` or `HIST` — historical rows are a built-in backtest of the
+exact same code path the live signals use.
+
 ## Repository layout
 
 ```

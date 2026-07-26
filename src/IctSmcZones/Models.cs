@@ -36,6 +36,15 @@ namespace IctSmc
         BodyClose
     }
 
+    /// <summary>Chart display philosophy.</summary>
+    public enum DisplayMode
+    {
+        /// <summary>Live-trading view: only currently tradeable objects near price.</summary>
+        Clean,
+        /// <summary>Review view: no proximity culling, longer retention of past objects.</summary>
+        Detailed
+    }
+
     /// <summary>How the higher timeframe is chosen.</summary>
     public enum HtfSelectionMode
     {
@@ -56,6 +65,8 @@ namespace IctSmc
 
     internal sealed class Zone
     {
+        /// <summary>Stable id for journaling and audit.</summary>
+        public int Id;
         public ZoneType Type;
         public bool IsHtf;
         /// <summary>Human label of the HTF layer this zone belongs to ("4H", "D", …). Empty for chart-TF zones.</summary>
@@ -72,6 +83,8 @@ namespace IctSmc
         public bool TouchAlerted;
         /// <summary>Set once this FVG has spawned its inversion zone (each gap inverts at most once).</summary>
         public bool Inverted;
+        /// <summary>First-touch journaling latch (independent of the alert toggle).</summary>
+        public bool TouchLogged;
 
         public bool IsBullish => Type is ZoneType.BullOrderBlock or ZoneType.BullFvg or ZoneType.BullIfvg;
         public bool IsOrderBlock => Type is ZoneType.BullOrderBlock or ZoneType.BearOrderBlock;
@@ -87,8 +100,8 @@ namespace IctSmc
                     ZoneType.BearOrderBlock => "OB▼",
                     ZoneType.BullFvg => "FVG▲",
                     ZoneType.BearFvg => "FVG▼",
-                    ZoneType.BullIfvg => "IFVG▲",
-                    _ => "IFVG▼"
+                    ZoneType.BullIfvg => "iFVG▲",
+                    _ => "iFVG▼"
                 };
                 return IsHtf ? $"{(string.IsNullOrEmpty(HtfLabel) ? "HTF" : HtfLabel)} {core}" : core;
             }
@@ -128,6 +141,51 @@ namespace IctSmc
         public bool Bullish;
         /// <summary>true = Market Structure Shift (reversal), false = Break of Structure (continuation).</summary>
         public bool IsMss;
+    }
+
+    /// <summary>
+    /// One fired entry signal, tracked bar-by-bar for MAE/MFE and outcome —
+    /// the raw material of the performance analytics.
+    /// </summary>
+    internal sealed class SignalRecord
+    {
+        public int Id;
+        public System.DateTime Time;
+        public bool Live;
+        public bool Long;
+        public string Tier = "";
+        public string ArmSource = "";
+        public string TriggerTag = "";
+        public ZoneType TriggerType;
+        public bool TriggerHtf;
+        public string Layer = "";
+        public decimal ZoneTop;
+        public decimal ZoneBottom;
+        public decimal Entry;
+        public decimal Sl;
+        public decimal Tp2;
+        public decimal Tp3;
+        public string PdStatus = "";
+        public string Confluence = "";
+        public int SignalBar;
+
+        // Excursion tracking (absolute price units; reported in R).
+        public decimal Mae;
+        public decimal Mfe;
+        public bool Tp2Hit;
+        public bool Resolved;
+        public string Outcome = "";
+        public decimal Exit;
+        public int ResolvedBar;
+
+        public decimal Risk => System.Math.Abs(Entry - Sl);
+
+        public string ZoneFamily => TriggerType switch
+        {
+            ZoneType.BullOrderBlock or ZoneType.BearOrderBlock => "OB",
+            ZoneType.BullFvg or ZoneType.BearFvg => "FVG",
+            _ => "iFVG"
+        };
     }
 
     /// <summary>A higher-timeframe candle aggregated from chart bars.</summary>

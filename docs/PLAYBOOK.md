@@ -389,7 +389,26 @@ book:
 
 ---
 
-## 12. Honest limitations
+## 12. Live rendering & the audit trail
+
+**Clean display mode (default).** The chart shows only what is tradeable now:
+mitigated/invalidated zones vanish instantly (kept briefly in data for the iFVG
+window and the journal); zones stop one bar past the live candle instead of smearing
+to the right edge; only the nearest `MaxVisibleZonesPerSide` unmitigated zones per
+side within `ZoneVisibilityAtrRange × ATR` render (HTF zones get double range so a
+fresh previous-day OB stays visible); HTF zones draw as gold frames rather than
+fills; labels are precisely centered on backdrop pills and auto-hide when they
+don't fit; only the last `MaxStructureLabels` BoS/MSS events and recently swept
+liquidity remain. `Detailed` mode disables culling for post-session review.
+
+**Journal.** Four CSVs per session under `Documents\ATAS\ICTSMC-Journal`:
+events (zone lifecycle, sweeps, structure, failed MSS), signals (full trade plan +
+arm source + confluence), outcomes (SL/TP2/TP3/Timeout with conservative SL-first
+resolution, R-multiple, MAE/MFE in R, bars held), and analytics (win-rate and
+expectancy grouped by zone family, layer, arm source, tier, direction). Historical
+rows are flagged HIST and act as a backtest of the identical live code path.
+
+## 13. Honest limitations
 
 - Swings confirm with a `SwingPeriod` lag; structure events therefore lag pivots. This
   is the cost of zero repainting.

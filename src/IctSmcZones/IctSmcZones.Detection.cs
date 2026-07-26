@@ -22,7 +22,9 @@ namespace IctSmc
             DetectFvg(bar);
             ApplyBodyCloseMitigation(bar);
             UpdateHtf(bar);
+            UpdateOpenSignals(bar);
             Prune(bar);
+            FlushJournalBuffers();
         }
 
         #region ATR
@@ -286,8 +288,10 @@ namespace IctSmc
             if (overlaps)
                 return;
 
+            zone.Id = ++_nextZoneId;
             _zones.Add(zone);
             OnZoneCreated(zone);
+            JournalEvent(_lastSeenBar, "ZoneCreated", zone.IsBullish ? "Bull" : "Bear", zone, 0m, "");
 
             var sameType = _zones.Where(z => z.Type == zone.Type && z.IsHtf == zone.IsHtf &&
                                              z.HtfLabel == zone.HtfLabel && z.State != ZoneState.Mitigated)
@@ -373,7 +377,11 @@ namespace IctSmc
             }
 
             foreach (var inversion in inversions)
+            {
                 AddZone(inversion);
+                JournalEvent(bar, "ZoneInverted", inversion.IsBullish ? "Bull" : "Bear", inversion, 0m,
+                    "FVG flipped polarity (body close through)");
+            }
 
             // Classify finished sweeps: close back inside = trap, close through = run.
             foreach (var level in _liquidity.Where(l => l.Swept && l.SweptBar == bar && l.WasTrap == null))
@@ -382,15 +390,22 @@ namespace IctSmc
 
         private void Mitigate(Zone zone, int bar)
         {
+            if (zone.State == ZoneState.Mitigated)
+                return;
+
             zone.State = ZoneState.Mitigated;
             zone.EndBar = bar;
+            JournalEvent(bar, "ZoneMitigated", zone.IsBullish ? "Bull" : "Bear", zone, 0m, "");
         }
 
         private void Prune(int bar)
         {
+            // Mitigated zones vanish from RENDERING immediately (unless ShowMitigated),
+            // but stay in the data for KeepMitigatedBars — the iFVG engine needs the
+            // broken gap for its 3-bar inversion window, and the journal needs the id.
             _zones.RemoveAll(z =>
                 z.State == ZoneState.Mitigated &&
-                (!ShowMitigated || bar - (z.EndBar ?? bar) > KeepMitigatedBars));
+                bar - (z.EndBar ?? bar) > KeepMitigatedBars);
 
             if (_structure.Count > 150)
                 _structure.RemoveRange(0, _structure.Count - 150);
