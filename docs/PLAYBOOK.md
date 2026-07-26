@@ -157,7 +157,7 @@ traders who bought/sold inside it are trapped. The zone flips polarity:
 - broken **bearish** FVG → **IFVG▲** support.
 
 Rules: only plain FVGs invert (an inversion never re-inverts); the flip must happen at
-the break or within 3 bars of a wick-based mitigation; HTF gaps invert into HTF IFVGs,
+the break or within 3 bars of a wick-based mitigation; HTF gaps invert into HTF iFVGs,
 inheriting their layer label. IFVGs are full zones — drawn in their own colors
 (teal ▲ / purple ▼), touch-alerted, and eligible for entry-model matches and confluence
 scoring like any other zone. Toggle: `IfvgEnabled` (default on).

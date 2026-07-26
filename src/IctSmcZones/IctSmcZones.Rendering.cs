@@ -152,11 +152,8 @@ namespace IctSmc
                 {
                     // HTF zones are frames, not fills — they outline confluence
                     // without stacking paint over the LTF zones inside them.
-                    var framePen = new RenderPen(Color.FromArgb(210, HtfBorderColor), 2);
-                    context.DrawRectangle(framePen, rect);
-
-                    var innerPen = new RenderPen(Color.FromArgb(90, baseColor), 1);
-                    context.DrawRectangle(innerPen, Rectangle.Inflate(rect, -2, -2));
+                    // Same 1px weight as LTF borders; the gold hue alone marks HTF.
+                    context.DrawRectangle(new RenderPen(Color.FromArgb(220, HtfBorderColor), 1), rect);
                 }
                 else
                 {
@@ -207,6 +204,27 @@ namespace IctSmc
             context.DrawString(zone.Tag, ZoneFont, Color.FromArgb(240, labelColor), textX, textY);
         }
 
+        /// <summary>
+        /// Line labels (BoS/MSS, BSL/SSL, Sweep/Run) follow the exact same centering
+        /// contract as zone labels: horizontally centered on the segment, vertically
+        /// centered ON the line, on a backdrop pill, hidden when they cannot fit.
+        /// </summary>
+        private void DrawCenteredLineLabel(RenderContext context, string text, Color color,
+            int x1, int x2, int y, Rectangle region)
+        {
+            var size = context.MeasureString(text, StructureFont);
+            if (x2 - x1 < size.Width + 10)
+                return;
+
+            var textX = x1 + (x2 - x1 - size.Width) / 2;
+            var textY = y - size.Height / 2;
+            textY = Math.Max(region.Top + 1, Math.Min(textY, region.Bottom - size.Height - 1));
+
+            var pill = new Rectangle(textX - 4, textY - 1, size.Width + 8, size.Height + 2);
+            context.FillRectangle(Color.FromArgb(LabelBackdropAlpha, 12, 12, 12), pill);
+            context.DrawString(text, StructureFont, Color.FromArgb(235, color), textX, textY);
+        }
+
         private Color ZoneColor(Zone zone) => zone.Type switch
         {
             ZoneType.BullOrderBlock => BullObColor,
@@ -251,20 +269,15 @@ namespace IctSmc
 
                 if (!level.Swept)
                 {
-                    if (x2 - x1 >= 40)
-                    {
-                        var label = level.BuySide
-                            ? (level.IsEqual ? "EQH · BSL" : "BSL")
-                            : (level.IsEqual ? "EQL · SSL" : "SSL");
-                        context.DrawString(label, ZoneFont, Color.FromArgb(200, color), x1 + 3,
-                            level.BuySide ? y - 13 : y + 2);
-                    }
+                    var label = level.BuySide
+                        ? (level.IsEqual ? "EQH · BSL" : "BSL")
+                        : (level.IsEqual ? "EQL · SSL" : "SSL");
+                    DrawCenteredLineLabel(context, label, color, x1, x2, y, region);
                 }
-                else if (level.SweptBar.HasValue && x2 - x1 >= 24)
+                else if (level.SweptBar.HasValue)
                 {
-                    var sweepTag = level.WasTrap == true ? "x Sweep" : "x Run";
-                    context.DrawString(sweepTag, StructureFont, Color.FromArgb(200, color),
-                        x2 - 2, level.BuySide ? y - 14 : y + 2);
+                    var sweepTag = level.WasTrap == true ? "Sweep" : "Run";
+                    DrawCenteredLineLabel(context, sweepTag, color, x1, x2, y, region);
                 }
             }
         }
@@ -302,13 +315,7 @@ namespace IctSmc
 
                 context.DrawLine(pen, x1, y, x2, y);
 
-                if (x2 - x1 >= 20)
-                {
-                    var label = evt.IsMss ? "MSS" : "BoS";
-                    var size = context.MeasureString(label, StructureFont);
-                    var textY = evt.Bullish ? y - size.Height - 1 : y + 2;
-                    context.DrawString(label, StructureFont, Color.FromArgb(230, color), x2 - size.Width, textY);
-                }
+                DrawCenteredLineLabel(context, evt.IsMss ? "MSS" : "BoS", color, x1, x2, y, region);
             }
         }
 

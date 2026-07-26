@@ -94,14 +94,13 @@ namespace IctSmc
         {
             get
             {
+                // No direction glyphs: side is already conveyed by color and by the
+                // zone sitting above (resistance) or below (support) price.
                 var core = Type switch
                 {
-                    ZoneType.BullOrderBlock => "OB▲",
-                    ZoneType.BearOrderBlock => "OB▼",
-                    ZoneType.BullFvg => "FVG▲",
-                    ZoneType.BearFvg => "FVG▼",
-                    ZoneType.BullIfvg => "iFVG▲",
-                    _ => "iFVG▼"
+                    ZoneType.BullOrderBlock or ZoneType.BearOrderBlock => "OB",
+                    ZoneType.BullFvg or ZoneType.BearFvg => "FVG",
+                    _ => "iFVG"
                 };
                 return IsHtf ? $"{(string.IsNullOrEmpty(HtfLabel) ? "HTF" : HtfLabel)} {core}" : core;
             }

@@ -65,8 +65,7 @@ is traded on the correct side of the range.
 The book stresses HTF alignment without spelling out the mechanics, so the indicator
 implements the standard institutional approach: chart candles are aggregated into HTF
 time buckets (`Detection.cs → UpdateHtf`), and the same FVG/OB logic runs on that
-synthetic series. HTF zones are drawn over the LTF chart with thicker borders and higher
-opacity — LTF entries inside an HTF zone are the highest-quality setups.
+synthetic series. HTF zones are drawn over the LTF chart as gold frames — LTF entries inside an HTF zone are the highest-quality setups.
 
 ### Auto HTF selection
 

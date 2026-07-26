@@ -84,8 +84,7 @@ Copy `src/IctSmcZones/bin/Release/IctSmcZones.dll` into
   premium/discount filter + tolerance, opposite-MSS cancellation, failed-MSS trap
   arming (IFVG logic), SL buffer ticks
 - **Palette** — every zone family has its own hue so the chart reads at a glance:
-  OB green/red, FVG blue/orange, IFVG teal/purple, HTF zones framed with a gold
-  border on top of their type color; labels auto-hide when a zone is too small,
+  OB green/red, FVG blue/orange, IFVG teal/purple, HTF zones rendered as gold frames (same 1px weight as LTF borders); labels auto-hide when a zone is too small,
   so zooming out never leaves orphaned text
 
 ## Journal / audit pipeline
