@@ -60,10 +60,30 @@ is traded on the correct side of the range.
 ## 6. Higher-timeframe framework
 
 The book stresses HTF alignment without spelling out the mechanics, so the indicator
-implements the standard institutional approach: chart candles are aggregated into
-`HtfMinutes` buckets (`Detection.cs → UpdateHtf`), and the same FVG/OB logic runs on that
+implements the standard institutional approach: chart candles are aggregated into HTF
+time buckets (`Detection.cs → UpdateHtf`), and the same FVG/OB logic runs on that
 synthetic series. HTF zones are drawn over the LTF chart with thicker borders and higher
 opacity — LTF entries inside an HTF zone are the highest-quality setups.
+
+### Auto HTF selection
+
+- The chart timeframe is **measured from the data**, never read from platform strings:
+  the mode of consecutive bar-open time deltas wins (session/weekend gaps are outvoted).
+  If no delta dominates (tick/volume/range/renko charts), the **median** bar duration is
+  rounded up to the next standard TF as a conservative basis.
+- Ladder: `≤1m → 15m (+1H)`, `≤5m → 1H (+4H)`, `≤1H → 4H (+D)`, `≤4H → D (+W)`,
+  `>4H → W`. The chosen HTF is guaranteed to sit strictly above the chart TF; a second
+  layer is optional (`AutoSecondLayer`).
+- Buckets are truncated from absolute ticks, so they always align to clock boundaries
+  (:00 for 1H, 00:00 for D, Monday 00:00 for W — .NET tick zero is a Monday). Daily and
+  weekly buckets can be shifted with `DailyAnchorMinutes` to match a futures session
+  open (e.g. 1080 = 18:00 platform time).
+- On configuration the aggregators are **retro-fed the entire chart history**, so HTF
+  zones are identical whether you loaded the chart fresh or watched it live all day —
+  no path dependence.
+- Any HTF setting change triggers a full recalculation from bar 0 (never a patched
+  state), and the on-chart badge shows `HTF auto: 4H + D · chart 1H` so the selection
+  is verifiable at a glance on every timeframe switch.
 
 ## 7. Entry model (Ch. 7, “Basic Entry Model — SMC style”)
 

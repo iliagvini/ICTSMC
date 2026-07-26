@@ -280,6 +280,7 @@ namespace IctSmc
                 z.State != ZoneState.Mitigated &&
                 z.Type == zone.Type &&
                 z.IsHtf == zone.IsHtf &&
+                z.HtfLabel == zone.HtfLabel &&
                 zone.Top >= z.Bottom && zone.Bottom <= z.Top);
 
             if (overlaps)
@@ -288,7 +289,8 @@ namespace IctSmc
             _zones.Add(zone);
             OnZoneCreated(zone);
 
-            var sameType = _zones.Where(z => z.Type == zone.Type && z.IsHtf == zone.IsHtf && z.State != ZoneState.Mitigated)
+            var sameType = _zones.Where(z => z.Type == zone.Type && z.IsHtf == zone.IsHtf &&
+                                             z.HtfLabel == zone.HtfLabel && z.State != ZoneState.Mitigated)
                                  .OrderByDescending(z => z.StartBar)
                                  .ToList();
 
@@ -352,30 +354,209 @@ namespace IctSmc
 
         #region Higher timeframe framework
 
+        /// <summary>Standard institutional HTF ladder used by Auto mode.</summary>
+        private static readonly int[] HtfRungs = { 15, 60, 240, 1440, 10080 };
+
         /// <summary>
         /// Aggregates chart candles into HTF buckets by open time and runs the same
         /// institutional detection (FVG + displacement order blocks) on that series.
         /// HTF zones carry more weight — the book: "OBs are more powerful when
         /// aligned with higher timeframes".
+        ///
+        /// In Auto mode the chart timeframe is MEASURED from the data itself (mode of
+        /// bar-open time deltas — no reliance on platform strings), then the HTF
+        /// layer(s) are chosen from the institutional ladder 15m → 1H → 4H → D → W.
+        /// Once configured, the aggregators are retro-fed the full history so HTF
+        /// zones exist from the very first chart bar.
         /// </summary>
         private void UpdateHtf(int bar)
         {
             if (!HtfEnabled)
                 return;
 
-            var candle = GetCandle(bar);
-            var bucketTicks = TimeSpan.FromMinutes(HtfMinutes).Ticks;
-            var bucketStart = new DateTime(candle.Time.Ticks - candle.Time.Ticks % bucketTicks);
-
-            if (_htfCurrent == null || bucketStart > _htfCurrent.BucketStart)
+            if (!_htfConfigured)
             {
-                if (_htfCurrent != null)
+                CollectBarDeltaSample(bar);
+
+                // Configure once we have a solid sample — or at the end of a short history.
+                if (_barDeltaSamples.Count >= 30 || bar >= CurrentBar - 2)
                 {
-                    _htfCandles.Add(_htfCurrent);
-                    OnHtfCandleClosed();
+                    ConfigureHtfLayers();
+                    _htfConfigured = true;
+
+                    for (var i = 1; i <= bar; i++)
+                        foreach (var agg in _htfAggregators)
+                            FeedAggregator(agg, i);
                 }
 
-                _htfCurrent = new HtfCandle
+                return;
+            }
+
+            foreach (var agg in _htfAggregators)
+                FeedAggregator(agg, bar);
+        }
+
+        private void CollectBarDeltaSample(int bar)
+        {
+            if (bar < 2)
+                return;
+
+            var delta = GetCandle(bar).Time - GetCandle(bar - 1).Time;
+            var seconds = (long)Math.Round(delta.TotalSeconds);
+            if (seconds <= 0)
+                return;
+
+            _barDeltaSamples.Add(seconds);
+            _barDeltaCounts.TryGetValue(seconds, out var n);
+            _barDeltaCounts[seconds] = n + 1;
+        }
+
+        /// <summary>
+        /// Estimates the chart timeframe in minutes from measured bar durations.
+        /// Time-based charts produce one dominant delta (session gaps are outvoted);
+        /// tick/volume/range charts have irregular deltas, so the median duration is
+        /// rounded UP to the next standard timeframe as a conservative basis.
+        /// </summary>
+        private int EstimateChartMinutes(out bool regular, out double approxMinutes)
+        {
+            regular = true;
+            approxMinutes = 1;
+
+            if (_barDeltaSamples.Count == 0)
+                return 1;
+
+            long modeKey = 0;
+            var modeCount = 0;
+            foreach (var kv in _barDeltaCounts)
+            {
+                if (kv.Value > modeCount)
+                {
+                    modeCount = kv.Value;
+                    modeKey = kv.Key;
+                }
+            }
+
+            if (modeCount >= _barDeltaSamples.Count / 2)
+            {
+                approxMinutes = modeKey / 60.0;
+                return Math.Max(1, (int)Math.Round(approxMinutes));
+            }
+
+            // Irregular (tick/volume/range/renko) chart.
+            regular = false;
+            var sorted = _barDeltaSamples.OrderBy(x => x).ToList();
+            approxMinutes = sorted[sorted.Count / 2] / 60.0;
+
+            foreach (var std in new[] { 1, 2, 3, 5, 10, 15, 30, 60, 240, 1440 })
+            {
+                if (approxMinutes <= std)
+                    return std;
+            }
+
+            return 1440;
+        }
+
+        /// <summary>Chart minutes → (primary, secondary) HTF from the institutional ladder.</summary>
+        private static (int Primary, int Secondary) AutoLadder(int chartMinutes)
+        {
+            var primary = chartMinutes switch
+            {
+                <= 1 => 15,     // 1m  → 15m (+1H)
+                <= 5 => 60,     // 2-5m → 1H (+4H)
+                <= 60 => 240,   // 15m-1H → 4H (+D)
+                <= 240 => 1440, // 2H-4H → D (+W)
+                _ => 10080      // D+ → W
+            };
+
+            // Guarantee the HTF sits strictly above the chart timeframe.
+            var idx = Array.IndexOf(HtfRungs, primary);
+            while (primary <= chartMinutes && idx < HtfRungs.Length - 1)
+                primary = HtfRungs[++idx];
+
+            if (primary <= chartMinutes)
+                return (0, 0);
+
+            var secondary = idx < HtfRungs.Length - 1 ? HtfRungs[idx + 1] : 0;
+            return (primary, secondary);
+        }
+
+        private static string MinutesToLabel(int minutes) => minutes switch
+        {
+            >= 10080 when minutes % 10080 == 0 => minutes == 10080 ? "W" : $"{minutes / 10080}W",
+            >= 1440 when minutes % 1440 == 0 => minutes == 1440 ? "D" : $"{minutes / 1440}D",
+            >= 60 when minutes % 60 == 0 => $"{minutes / 60}H",
+            _ => $"{minutes}m"
+        };
+
+        private void ConfigureHtfLayers()
+        {
+            _htfAggregators.Clear();
+
+            var chartMinutes = EstimateChartMinutes(out var regular, out var approx);
+            var layers = new List<int>();
+
+            if (HtfMode == HtfSelectionMode.Manual)
+            {
+                if (HtfMinutes > chartMinutes)
+                    layers.Add(HtfMinutes);
+            }
+            else
+            {
+                var (primary, secondary) = AutoLadder(chartMinutes);
+                if (primary > 0)
+                    layers.Add(primary);
+                if (AutoSecondLayer && secondary > 0)
+                    layers.Add(secondary);
+            }
+
+            foreach (var minutes in layers)
+                _htfAggregators.Add(new HtfAggregator { Minutes = minutes, Label = MinutesToLabel(minutes) });
+
+            var layerText = _htfAggregators.Count == 0
+                ? "none (chart TF too high)"
+                : string.Join(" + ", _htfAggregators.Select(a => a.Label));
+
+            var chartText = regular
+                ? MinutesToLabel(chartMinutes)
+                : $"~{approx:0.#}m/bar (irregular → {MinutesToLabel(chartMinutes)})";
+
+            _htfInfo = HtfMode == HtfSelectionMode.Manual
+                ? $"HTF manual: {layerText} · chart {chartText}"
+                : $"HTF auto: {layerText} · chart {chartText}";
+        }
+
+        /// <summary>
+        /// Bucket start for a candle open time. Buckets are anchored to midnight
+        /// (plus the configurable session anchor for daily-and-above layers, e.g.
+        /// 18:00 ET futures session opens). Weekly buckets align to Monday 00:00
+        /// because .NET tick zero (0001-01-01) is a Monday.
+        /// </summary>
+        private DateTime GetBucketStart(DateTime time, int minutes)
+        {
+            var anchorTicks = minutes >= 1440 ? TimeSpan.FromMinutes(DailyAnchorMinutes).Ticks : 0L;
+            var span = TimeSpan.FromMinutes(minutes).Ticks;
+            var shifted = time.Ticks - anchorTicks;
+
+            if (shifted < 0)
+                shifted = 0;
+
+            return new DateTime(shifted - shifted % span + anchorTicks);
+        }
+
+        private void FeedAggregator(HtfAggregator agg, int bar)
+        {
+            var candle = GetCandle(bar);
+            var bucketStart = GetBucketStart(candle.Time, agg.Minutes);
+
+            if (agg.Current == null || bucketStart > agg.Current.BucketStart)
+            {
+                if (agg.Current != null)
+                {
+                    agg.Candles.Add(agg.Current);
+                    OnHtfCandleClosed(agg);
+                }
+
+                agg.Current = new HtfCandle
                 {
                     BucketStart = bucketStart,
                     FirstChartBar = bar,
@@ -388,25 +569,26 @@ namespace IctSmc
             }
             else
             {
-                _htfCurrent.High = Math.Max(_htfCurrent.High, candle.High);
-                _htfCurrent.Low = Math.Min(_htfCurrent.Low, candle.Low);
-                _htfCurrent.Close = candle.Close;
-                _htfCurrent.LastChartBar = bar;
+                agg.Current.High = Math.Max(agg.Current.High, candle.High);
+                agg.Current.Low = Math.Min(agg.Current.Low, candle.Low);
+                agg.Current.Close = candle.Close;
+                agg.Current.LastChartBar = bar;
             }
 
-            if (_htfCandles.Count > 400)
-                _htfCandles.RemoveRange(0, _htfCandles.Count - 400);
+            if (agg.Candles.Count > 400)
+                agg.Candles.RemoveRange(0, agg.Candles.Count - 400);
         }
 
-        private void OnHtfCandleClosed()
+        private void OnHtfCandleClosed(HtfAggregator agg)
         {
-            var n = _htfCandles.Count;
+            var candles = agg.Candles;
+            var n = candles.Count;
 
             if (HtfFvgEnabled && n >= 3)
             {
-                var a = _htfCandles[n - 3];
-                var c = _htfCandles[n - 2];
-                var b = _htfCandles[n - 1];
+                var a = candles[n - 3];
+                var c = candles[n - 2];
+                var b = candles[n - 1];
 
                 var minSize = Math.Max(MinFvgTicks * TickSize, _atr * MinFvgAtrFraction);
 
@@ -416,6 +598,7 @@ namespace IctSmc
                     {
                         Type = ZoneType.BullFvg,
                         IsHtf = true,
+                        HtfLabel = agg.Label,
                         StartBar = c.FirstChartBar,
                         Top = b.Low,
                         Bottom = a.High
@@ -427,6 +610,7 @@ namespace IctSmc
                     {
                         Type = ZoneType.BearFvg,
                         IsHtf = true,
+                        HtfLabel = agg.Label,
                         StartBar = c.FirstChartBar,
                         Top = a.Low,
                         Bottom = b.High
@@ -436,8 +620,8 @@ namespace IctSmc
 
             if (HtfObEnabled && n >= 6)
             {
-                var last = _htfCandles[n - 1];
-                var avgRange = _htfCandles.Skip(Math.Max(0, n - 11)).Take(10).Average(x => x.High - x.Low);
+                var last = candles[n - 1];
+                var avgRange = candles.Skip(Math.Max(0, n - 11)).Take(10).Average(x => x.High - x.Low);
 
                 if (avgRange > 0 && last.High - last.Low >= avgRange * HtfDisplacementFactor)
                 {
@@ -445,7 +629,7 @@ namespace IctSmc
 
                     for (var i = n - 2; i >= Math.Max(0, n - 6); i--)
                     {
-                        var c = _htfCandles[i];
+                        var c = candles[i];
                         var isOpposite = bullish ? c.Close < c.Open : c.Close > c.Open;
                         if (!isOpposite)
                             continue;
@@ -454,6 +638,7 @@ namespace IctSmc
                         {
                             Type = bullish ? ZoneType.BullOrderBlock : ZoneType.BearOrderBlock,
                             IsHtf = true,
+                            HtfLabel = agg.Label,
                             StartBar = c.FirstChartBar,
                             Top = ObStyle == ObZoneStyle.Body ? Math.Max(c.Open, c.Close) : c.High,
                             Bottom = ObStyle == ObZoneStyle.Body ? Math.Min(c.Open, c.Close) : c.Low

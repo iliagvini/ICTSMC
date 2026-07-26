@@ -47,9 +47,13 @@ namespace IctSmc
         private readonly List<SwingPoint> _swingLows = new();
         private readonly List<LiquidityLevel> _liquidity = new();
         private readonly List<StructureEvent> _structure = new();
-        private readonly List<HtfCandle> _htfCandles = new();
 
-        private HtfCandle _htfCurrent;
+        // HTF engine
+        private readonly List<HtfAggregator> _htfAggregators = new();
+        private readonly Dictionary<long, int> _barDeltaCounts = new(); // delta seconds -> occurrences
+        private readonly List<long> _barDeltaSamples = new();
+        private bool _htfConfigured;
+        private string _htfInfo = "";
 
         private SwingPoint _lastSwingHigh;
         private SwingPoint _lastSwingLow;
@@ -197,12 +201,51 @@ namespace IctSmc
 
         #region HTF settings
 
-        [Display(GroupName = GrpHtf, Name = "Enable HTF mapping", Order = 700)]
-        public bool HtfEnabled { get; set; } = true;
+        // HTF settings use explicit setters so any change triggers a full, clean
+        // recalculation — the aggregation layers are rebuilt from bar 0, never patched.
 
-        [Display(GroupName = GrpHtf, Name = "HTF timeframe (minutes)", Order = 710)]
-        [Range(1, 10080)]
-        public int HtfMinutes { get; set; } = 60;
+        private bool _htfEnabled = true;
+        private HtfSelectionMode _htfMode = HtfSelectionMode.Auto;
+        private int _htfManualMinutes = 240;
+        private bool _autoSecondLayer = true;
+        private int _dailyAnchorMinutes;
+
+        [Display(GroupName = GrpHtf, Name = "Enable HTF mapping", Order = 700)]
+        public bool HtfEnabled
+        {
+            get => _htfEnabled;
+            set { _htfEnabled = value; RecalculateValues(); }
+        }
+
+        [Display(GroupName = GrpHtf, Name = "HTF selection", Order = 705)]
+        public HtfSelectionMode HtfMode
+        {
+            get => _htfMode;
+            set { _htfMode = value; RecalculateValues(); }
+        }
+
+        [Display(GroupName = GrpHtf, Name = "Manual HTF (minutes, Manual mode only)", Order = 710)]
+        [Range(1, 20160)]
+        public int HtfMinutes
+        {
+            get => _htfManualMinutes;
+            set { _htfManualMinutes = Math.Max(1, value); RecalculateValues(); }
+        }
+
+        [Display(GroupName = GrpHtf, Name = "Auto: add second HTF layer", Order = 712)]
+        public bool AutoSecondLayer
+        {
+            get => _autoSecondLayer;
+            set { _autoSecondLayer = value; RecalculateValues(); }
+        }
+
+        [Display(GroupName = GrpHtf, Name = "Daily+ anchor (minutes after midnight)", Order = 714)]
+        [Range(0, 1439)]
+        public int DailyAnchorMinutes
+        {
+            get => _dailyAnchorMinutes;
+            set { _dailyAnchorMinutes = Math.Clamp(value, 0, 1439); RecalculateValues(); }
+        }
 
         [Display(GroupName = GrpHtf, Name = "HTF Fair Value Gaps", Order = 720)]
         public bool HtfFvgEnabled { get; set; } = true;
@@ -214,9 +257,12 @@ namespace IctSmc
         [Range(0, 10)]
         public decimal HtfDisplacementFactor { get; set; } = 1.3m;
 
-        [Display(GroupName = GrpHtf, Name = "Max HTF zones", Order = 750)]
+        [Display(GroupName = GrpHtf, Name = "Max HTF zones per layer", Order = 750)]
         [Range(1, 100)]
         public int MaxHtfZones { get; set; } = 12;
+
+        [Display(GroupName = GrpHtf, Name = "Show HTF info badge", Order = 760)]
+        public bool ShowHtfInfoBadge { get; set; } = true;
 
         #endregion
 
@@ -331,8 +377,11 @@ namespace IctSmc
             _swingLows.Clear();
             _liquidity.Clear();
             _structure.Clear();
-            _htfCandles.Clear();
-            _htfCurrent = null;
+            _htfAggregators.Clear();
+            _barDeltaCounts.Clear();
+            _barDeltaSamples.Clear();
+            _htfConfigured = false;
+            _htfInfo = "";
             _lastSwingHigh = null;
             _lastSwingLow = null;
             _trend = 0;

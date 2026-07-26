@@ -32,6 +32,15 @@ namespace IctSmc
         BodyClose
     }
 
+    /// <summary>How the higher timeframe is chosen.</summary>
+    public enum HtfSelectionMode
+    {
+        /// <summary>Detect the chart timeframe from the data and pick the institutional HTF ladder automatically.</summary>
+        Auto,
+        /// <summary>Use the fixed minutes configured in settings.</summary>
+        Manual
+    }
+
     /// <summary>Which part of the order-block candle builds the zone.</summary>
     public enum ObZoneStyle
     {
@@ -45,6 +54,8 @@ namespace IctSmc
     {
         public ZoneType Type;
         public bool IsHtf;
+        /// <summary>Human label of the HTF layer this zone belongs to ("4H", "D", …). Empty for chart-TF zones.</summary>
+        public string HtfLabel = "";
         public int StartBar;
         public decimal Top;
         public decimal Bottom;
@@ -69,7 +80,7 @@ namespace IctSmc
                     ZoneType.BullFvg => "FVG▲",
                     _ => "FVG▼"
                 };
-                return IsHtf ? "HTF " + core : core;
+                return IsHtf ? $"{(string.IsNullOrEmpty(HtfLabel) ? "HTF" : HtfLabel)} {core}" : core;
             }
         }
 
@@ -119,5 +130,17 @@ namespace IctSmc
         public decimal High;
         public decimal Low;
         public decimal Close;
+    }
+
+    /// <summary>
+    /// One higher-timeframe layer: aggregates chart candles into fixed time buckets
+    /// and keeps the resulting synthetic series.
+    /// </summary>
+    internal sealed class HtfAggregator
+    {
+        public int Minutes;
+        public string Label;
+        public readonly System.Collections.Generic.List<HtfCandle> Candles = new();
+        public HtfCandle Current;
     }
 }

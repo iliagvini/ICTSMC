@@ -16,7 +16,7 @@ candle to close.
 | **BoS / MSS** (Ch. 6) | Fractal swings → close-through breaks; continuation = BoS (dashed), reversal = MSS/CHoCH (solid, stronger) |
 | **Entry model** (Ch. 7) | State machine: *liquidity sweep → MSS → price returns to aligned FVG/OB in the correct half of the range* → entry alert with SL + 2R/3R targets |
 | **Premium / Discount, Power of 3** (Ch. 8) | Equilibrium (50%) of the current dealing range, subtle premium/discount shading; entry model only buys in discount / sells in premium |
-| **Higher-timeframe framework** | Chart bars are aggregated into a configurable HTF (default 60 min); HTF FVGs and HTF OBs are mapped onto your LTF chart with stronger styling — “OBs are more powerful when aligned with higher timeframes” |
+| **Higher-timeframe framework** | **Auto mode (default):** the indicator *measures* the chart timeframe from the data itself and picks the institutional ladder (1m→15m+1H, 5m→1H+4H, 15m–1H→4H+D, 4H→D+W); HTF FVGs and OBs are mapped onto your chart with stronger styling. An on-chart badge shows exactly what was detected/chosen. Manual mode with fixed minutes is still available |
 
 ## Alerts
 
@@ -63,7 +63,11 @@ Copy `src/IctSmcZones/bin/Release/IctSmcZones.dll` into
   zone style (body vs full range), mitigation rule per type:
   `AnyTouch`, `Midline` (50%), `FullFill`, `BodyClose`
 - **Liquidity** — equal-level tolerance in ticks, max levels per side
-- **HTF** — timeframe in minutes, HTF FVG/OB toggles, displacement factor, zone cap
+- **HTF** — Auto/Manual selection, optional second HTF layer, daily session anchor
+  (e.g. 1080 = 18:00 platform time for futures), HTF FVG/OB toggles, displacement
+  factor, per-layer zone cap, info badge. In Auto mode the chart TF is estimated from
+  the mode of bar-open time deltas (robust to session gaps); on tick/volume/range
+  charts the median bar duration is rounded up to a standard TF — verify via the badge
 - **Entry model** — require sweep, sweep→MSS and MSS→entry windows,
   premium/discount filter, SL buffer ticks
 

@@ -37,6 +37,24 @@ namespace IctSmc
 
             if (ShowStructure)
                 RenderStructure(context, region);
+
+            if (HtfEnabled && ShowHtfInfoBadge)
+                RenderHtfBadge(context, region);
+        }
+
+        /// <summary>
+        /// Small badge in the chart corner showing the measured chart timeframe and
+        /// the HTF layer(s) in use — so the auto selection is always verifiable at a glance.
+        /// </summary>
+        private void RenderHtfBadge(RenderContext context, Rectangle region)
+        {
+            var text = string.IsNullOrEmpty(_htfInfo) ? "HTF: measuring chart timeframe…" : _htfInfo;
+            var size = context.MeasureString(text, ZoneFont);
+            var rect = new Rectangle(region.Left + 8, region.Top + 8, size.Width + 12, size.Height + 6);
+
+            context.FillRectangle(Color.FromArgb(150, 20, 20, 20), rect);
+            context.DrawRectangle(new RenderPen(Color.FromArgb(90, Color.White)), rect);
+            context.DrawString(text, ZoneFont, Color.FromArgb(235, Color.White), rect.X + 6, rect.Y + 3);
         }
 
         #region Zones
