@@ -219,17 +219,17 @@ namespace IctSmc
 
         private void RenderPremiumDiscount(RenderContext context, Rectangle region, int lastBar)
         {
-            if (_lastSwingHigh == null || _lastSwingLow == null)
+            // Same ordered dealing range the entry filter uses — the shading on the
+            // chart and the PD gate in the signal engine can never disagree.
+            var range = GetDealingRange();
+            if (!range.HasValue)
                 return;
 
-            var high = _lastSwingHigh.Price;
-            var low = _lastSwingLow.Price;
-            if (high <= low)
-                return;
-
+            var high = range.Value.High.Price;
+            var low = range.Value.Low.Price;
             var eq = (high + low) / 2m;
 
-            var anchorBar = Math.Min(_lastSwingHigh.Bar, _lastSwingLow.Bar);
+            var anchorBar = Math.Min(range.Value.High.Bar, range.Value.Low.Bar);
             var x1 = Math.Max(ChartInfo.GetXByBar(anchorBar, false), region.Left);
             var x2 = region.Right;
             if (x2 <= x1)

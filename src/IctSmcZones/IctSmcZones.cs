@@ -285,6 +285,13 @@ namespace IctSmc
         [Display(GroupName = GrpSignal, Name = "Respect premium/discount filter", Order = 840)]
         public bool EntryNeedsPdAlignment { get; set; } = true;
 
+        [Display(GroupName = GrpSignal, Name = "PD tolerance (% of range around EQ)", Order = 842)]
+        [Range(0, 50)]
+        public int PdTolerancePercent { get; set; } = 10;
+
+        [Display(GroupName = GrpSignal, Name = "Opposite MSS cancels armed setup", Order = 845)]
+        public bool CancelOnOppositeMss { get; set; } = true;
+
         [Display(GroupName = GrpSignal, Name = "Stop-loss buffer (ticks)", Order = 850)]
         [Range(0, 100)]
         public int SlBufferTicks { get; set; } = 4;
@@ -313,6 +320,9 @@ namespace IctSmc
 
         [Display(GroupName = GrpAlerts, Name = "Alert: entry-model signal", Order = 950)]
         public bool AlertOnEntry { get; set; } = true;
+
+        [Display(GroupName = GrpAlerts, Name = "Alert: failed MSS", Order = 955)]
+        public bool AlertOnFailedMss { get; set; } = true;
 
         #endregion
 

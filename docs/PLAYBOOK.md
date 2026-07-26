@@ -189,10 +189,16 @@ An OB is only created when a **structure break** happens (Layer 1 fires BoS/MSS)
 - **Dealing range** = most recent confirmed swing low ↔ swing high.
 - **Equilibrium (EQ)** = its 50% line, drawn dash-dot with subtle red shading above
   (premium) and green below (discount).
+- The pair is **order-corrected**: after a strong one-way run the latest swing high can
+  sit below the latest swing low; the engine walks back to the nearest consistent pair,
+  so equilibrium is never computed from an inverted range.
 - This layer is a **filter, not a signal**: with `EntryNeedsPdAlignment` on (default),
-  long entries only fire from zones whose midpoint sits **at or below EQ** (buying at a
-  discount), shorts only from zones **at or above EQ** (selling at a premium). Buying in
-  premium is paying retail prices — the exact mistake the cycle is designed to punish.
+  long entries only fire from zones whose midpoint sits at or below EQ, shorts at or
+  above. A **tolerance band** (`PdTolerancePercent`, default 10% of the range) keeps
+  strong zones sitting *near* equilibrium tradable instead of losing them to a
+  2-tick technicality; every entry alert reports where the zone actually sat:
+  `PD: Discount / Near EQ / Premium`. Buying deep in premium is paying retail prices —
+  the exact mistake the cycle is designed to punish.
 
 ---
 
@@ -264,16 +270,31 @@ stop-run is a much weaker reversal.
 A *bullish MSS* (close above the last swing high while trend was bearish) within
 `SweepToMssWindow` (40) bars of the sweep **arms** the long model for `ArmWindowBars`
 (30) bars. BoS does not arm. Timeouts guarantee stale sweeps can't produce entries days
-later.
+later, and unconsumed sweeps expire on their own after the window passes.
+
+**Structural invalidation (failed MSS).** The clock is not the only way out: an MSS is
+fresh information for *both* sides. If a bearish MSS prints while the long model is
+armed (or vice versa), the armed setup was built on a **failed shift** — it is cancelled
+immediately (`CancelOnOppositeMss`, default on) and a ⚠️ *Failed MSS* alert fires,
+because a failed shift is itself one of the strongest seeds of the opposite setup (it is
+how breaker-block reversals form). The stale sweep priming is cleared with it.
 
 **Stage 3 — Entry: return to the footprint.**
-While armed, the **first tick** into any *aligned* zone triggers the signal. Aligned =
+While armed, the **first tick** into *aligned* zones triggers the signal. Aligned =
 all of:
 - bullish zone (bullish OB or bullish FVG, LTF or HTF), formed before the current bar;
 - **unmitigated**;
-- midpoint at or below equilibrium (discount) — if PD alignment is on.
+- midpoint at or below equilibrium + tolerance band — if PD alignment is on.
 
-The 🟢/🔴 alert ships a complete trade plan:
+**Confluence scoring.** All zones touched by that tick are collected and the setup is
+tiered: any Daily/Weekly zone in the stack → **A++** (🟢🟢🟢), any other HTF zone →
+**A+** (🟢🟢), LTF-only → **B** (🟢). The alert lists the full stack
+(`Confluence: D OB▲ + 4H FVG▲ + FVG▲`) so a naked 15m tap and a triple-stacked A++
+are unmistakably different messages. The trade plan is built from the **trigger zone**
+(the one price physically touched first), keeping the stop structural and tight.
+
+The 🟢/🔴 alert ships a complete trade plan (tier marks repeated by confluence —
+🟢🟢🟢 = A++):
 
 - **Entry** ≈ zone top (bull) / zone bottom (bear) — the edge price just touched;
 - **SL** = opposite zone edge ± `SlBufferTicks` (4) — *structure-based, beyond the zone*
@@ -295,7 +316,8 @@ the same zone.
 | 💧 liquidity taken (side, EQH/EQL, next step hint) | tick of the cross | on |
 | 🎯 zone touch (zone id + expected reaction) | first tick into zone | on |
 | 📐 BoS / MSS (direction + meaning) | candle close | on |
-| 🟢/🔴 entry model (full trade plan) | tick of the return | on |
+| 🟢/🔴 entry model (tiered, full trade plan + confluence + PD status) | tick of the return | on |
+| ⚠️ failed MSS (armed setup structurally invalidated) | candle close of the opposite MSS | on |
 | 📦 zone created | candle close | off |
 
 - **Realtime-gated** — never fires during history replay.

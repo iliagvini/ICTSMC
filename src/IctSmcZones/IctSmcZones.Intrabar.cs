@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
@@ -128,9 +129,22 @@ namespace IctSmc
             if (!EntryModelEnabled || !evt.IsMss)
                 return;
 
-            // Arm the entry model when an MSS follows a liquidity sweep on the correct side.
+            // An MSS is fresh structural information for BOTH sides:
+            // it arms its own direction and it proves any opposite armed setup was
+            // built on a failed shift — cancel it instead of letting it expire by clock.
             if (evt.Bullish)
             {
+                if (CancelOnOppositeMss)
+                {
+                    var wasArmed = _armedBearUntil >= evt.Bar;
+                    _armedBearUntil = -1;
+                    _pendingBearSweepBar = -1;
+
+                    if (wasArmed && AlertOnFailedMss)
+                        Fire("⚠️ Failed bearish MSS — armed SHORT setup cancelled by a bullish MSS. " +
+                             "Failed shifts often fuel the opposite move: watch the new long side.");
+                }
+
                 var sweepOk = !RequireSweepForEntry ||
                               (_pendingBullSweepBar > 0 && evt.Bar - _pendingBullSweepBar <= SweepToMssWindow);
                 if (sweepOk)
@@ -138,6 +152,17 @@ namespace IctSmc
             }
             else
             {
+                if (CancelOnOppositeMss)
+                {
+                    var wasArmed = _armedBullUntil >= evt.Bar;
+                    _armedBullUntil = -1;
+                    _pendingBullSweepBar = -1;
+
+                    if (wasArmed && AlertOnFailedMss)
+                        Fire("⚠️ Failed bullish MSS — armed LONG setup cancelled by a bearish MSS. " +
+                             "Failed shifts often fuel the opposite move: watch the new short side.");
+                }
+
                 var sweepOk = !RequireSweepForEntry ||
                               (_pendingBearSweepBar > 0 && evt.Bar - _pendingBearSweepBar <= SweepToMssWindow);
                 if (sweepOk)
@@ -146,92 +171,162 @@ namespace IctSmc
         }
 
         /// <summary>
-        /// Fires the "sniper entry" alert the moment price returns into an aligned,
-        /// unmitigated zone while the model is armed (sweep + MSS already seen) and
-        /// the zone sits in the correct half of the dealing range.
+        /// Fires the "sniper entry" alert the moment price returns into aligned,
+        /// unmitigated zone(s) while the model is armed (sweep + MSS already seen).
+        /// All touched zones are collected so stacked LTF/HTF confluence is scored,
+        /// and the premium/discount check uses a tolerance band around equilibrium.
         /// </summary>
         private void TickEntryModel(int bar)
         {
             if (!EntryModelEnabled)
                 return;
 
+            // A sweep that never produced an MSS inside the window is stale — drop it
+            // so a much later MSS can't chain to ancient liquidity.
+            if (_pendingBullSweepBar > 0 && bar - _pendingBullSweepBar > SweepToMssWindow)
+                _pendingBullSweepBar = -1;
+            if (_pendingBearSweepBar > 0 && bar - _pendingBearSweepBar > SweepToMssWindow)
+                _pendingBearSweepBar = -1;
+
             var candle = GetCandle(bar);
-            var eq = GetEquilibrium();
+
+            var range = GetDealingRange();
+            decimal? eq = null;
+            var tolerance = 0m;
+
+            if (range.HasValue)
+            {
+                eq = (range.Value.High.Price + range.Value.Low.Price) / 2m;
+                tolerance = (range.Value.High.Price - range.Value.Low.Price) * PdTolerancePercent / 100m;
+            }
 
             if (_armedBullUntil >= bar)
             {
-                var zone = _zones.FirstOrDefault(z =>
+                var matches = _zones.Where(z =>
                     z.State != ZoneState.Mitigated &&
                     z.IsBullish &&
                     z.StartBar < bar &&
                     candle.Low <= z.Top &&
-                    (!EntryNeedsPdAlignment || eq == null || z.Mid <= eq.Value));
+                    (!EntryNeedsPdAlignment || eq == null || z.Mid <= eq.Value + tolerance)).ToList();
 
-                if (zone != null)
+                if (matches.Count > 0)
                 {
                     _armedBullUntil = -1;
                     _pendingBullSweepBar = -1;
-                    EmitEntrySignal(zone, longSide: true);
+                    EmitEntrySignal(matches, longSide: true, eq, tolerance);
                 }
             }
 
             if (_armedBearUntil >= bar)
             {
-                var zone = _zones.FirstOrDefault(z =>
+                var matches = _zones.Where(z =>
                     z.State != ZoneState.Mitigated &&
                     !z.IsBullish &&
                     z.StartBar < bar &&
                     candle.High >= z.Bottom &&
-                    (!EntryNeedsPdAlignment || eq == null || z.Mid >= eq.Value));
+                    (!EntryNeedsPdAlignment || eq == null || z.Mid >= eq.Value - tolerance)).ToList();
 
-                if (zone != null)
+                if (matches.Count > 0)
                 {
                     _armedBearUntil = -1;
                     _pendingBearSweepBar = -1;
-                    EmitEntrySignal(zone, longSide: false);
+                    EmitEntrySignal(matches, longSide: false, eq, tolerance);
                 }
             }
         }
 
-        private void EmitEntrySignal(Zone zone, bool longSide)
+        private void EmitEntrySignal(List<Zone> matches, bool longSide, decimal? eq, decimal tolerance)
         {
             if (!AlertOnEntry)
                 return;
+
+            // The trigger zone is the one price physically touched first
+            // (highest top for a falling tap, lowest bottom for a rising one);
+            // the trade plan is built from it so the stop stays structural and tight.
+            var trigger = longSide
+                ? matches.OrderByDescending(z => z.Top).First()
+                : matches.OrderBy(z => z.Bottom).First();
 
             var buffer = SlBufferTicks * TickSize;
             decimal entry, sl;
 
             if (longSide)
             {
-                entry = zone.Top;
-                sl = zone.Bottom - buffer;
+                entry = trigger.Top;
+                sl = trigger.Bottom - buffer;
             }
             else
             {
-                entry = zone.Bottom;
-                sl = zone.Top + buffer;
+                entry = trigger.Bottom;
+                sl = trigger.Top + buffer;
             }
 
             var risk = Math.Abs(entry - sl);
             var tp2 = longSide ? entry + risk * 2 : entry - risk * 2;
             var tp3 = longSide ? entry + risk * 3 : entry - risk * 3;
 
-            var dir = longSide ? "LONG" : "SHORT";
-            var emoji = longSide ? "🟢" : "🔴";
+            // Confluence tier: Daily/Weekly involvement = A++, any HTF = A+, LTF-only = B.
+            var tierCount = matches.Any(z => z.HtfMinutes >= 1440) ? 3
+                : matches.Any(z => z.IsHtf) ? 2
+                : 1;
+            var tierName = tierCount switch { 3 => "A++", 2 => "A+", _ => "B" };
+            var mark = string.Concat(Enumerable.Repeat(longSide ? "🟢" : "🔴", tierCount));
 
-            Fire($"{emoji} ENTRY MODEL {dir} — sweep + MSS + return to {zone.Tag} " +
-                 $"{FormatPrice(zone.Bottom)}–{FormatPrice(zone.Top)}.\n" +
+            var confluence = string.Join(" + ", matches
+                .OrderByDescending(z => z.HtfMinutes)
+                .ThenBy(z => z.Tag)
+                .Select(z => z.Tag)
+                .Distinct()
+                .Take(4));
+
+            var pdStatus = "n/a";
+            if (eq.HasValue)
+            {
+                pdStatus = trigger.Mid < eq.Value - tolerance ? "Discount"
+                    : trigger.Mid <= eq.Value + tolerance ? "Near EQ"
+                    : "Premium";
+            }
+
+            var dir = longSide ? "LONG" : "SHORT";
+
+            Fire($"{mark} ENTRY MODEL {dir} [{tierName}] — sweep + MSS + return to {trigger.Tag} " +
+                 $"{FormatPrice(trigger.Bottom)}–{FormatPrice(trigger.Top)}.\n" +
+                 $"Confluence: {confluence} | PD: {pdStatus}\n" +
                  $"Entry ~{FormatPrice(entry)} | SL {FormatPrice(sl)} | TP(2R) {FormatPrice(tp2)} | TP(3R) {FormatPrice(tp3)}.\n" +
                  "Confirm with a rejection wick / lower-TF MSS before executing.");
         }
 
-        /// <summary>Equilibrium (50%) of the current dealing range: last swing low ↔ last swing high.</summary>
-        private decimal? GetEquilibrium()
+        /// <summary>
+        /// Current dealing range as a properly ORDERED swing pair (high above low).
+        /// After a strong one-way run the most recent swing high can sit below the
+        /// most recent swing low; in that case the older side is walked back until a
+        /// consistent pair is found, so equilibrium is never computed from an
+        /// inverted range.
+        /// </summary>
+        private (SwingPoint High, SwingPoint Low)? GetDealingRange()
         {
-            if (_lastSwingHigh == null || _lastSwingLow == null)
+            if (_swingHighs.Count == 0 || _swingLows.Count == 0)
                 return null;
 
-            return (_lastSwingHigh.Price + _lastSwingLow.Price) / 2m;
+            var high = _swingHighs[^1];
+            var low = _swingLows[^1];
+
+            if (high.Price <= low.Price)
+            {
+                if (high.Bar >= low.Bar)
+                {
+                    low = _swingLows.FindLast(l => l.Price < high.Price);
+                }
+                else
+                {
+                    high = _swingHighs.FindLast(h => h.Price > low.Price);
+                }
+
+                if (high == null || low == null || high.Price <= low.Price)
+                    return null;
+            }
+
+            return (high, low);
         }
 
         #endregion

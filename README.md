@@ -26,7 +26,11 @@ per zone/level/event:
 - 🎯 **Zone touch** — instant, on the first tick into an FVG/OB (no close needed)
 - 💧 **Liquidity taken** — BSL/SSL crossed, with the follow-up hint (watch for MSS)
 - 📐 **BoS / MSS** — structure events with direction
-- 🟢/🔴 **Entry model** — sweep + MSS + return to zone, with entry, SL and 2R/3R targets
+- 🟢/🔴 **Entry model** — sweep + MSS + return to zone, tiered by confluence
+  (🟢🟢🟢 A++ with Daily/Weekly zone, 🟢🟢 A+ with any HTF zone, 🟢 B standalone),
+  with zone stack, PD status (Discount/Near EQ/Premium), entry, SL and 2R/3R targets
+- ⚠️ **Failed MSS** — an armed setup structurally invalidated by an opposite MSS
+  (often the seed of the reverse trade)
 - 📦 **Zone created** (off by default)
 
 ### Telegram setup

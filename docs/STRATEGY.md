@@ -89,12 +89,18 @@ opacity — LTF entries inside an HTF zone are the highest-quality setups.
 
 State machine in `Intrabar.cs`:
 
-1. **Liquidity sweep** — SSL taken primes longs, BSL taken primes shorts.
+1. **Liquidity sweep** — SSL taken primes longs, BSL taken primes shorts. Unconsumed
+   sweeps expire after `SweepToMssWindow` bars.
 2. **MSS** in the opposite direction within `SweepToMssWindow` bars → model armed for
-   `ArmWindowBars`.
-3. **Return to zone** — first tick into an aligned, unmitigated FVG/OB on the correct
-   side of equilibrium → 🟢/🔴 alert with entry, SL (`zone edge ± SlBufferTicks`) and
-   2R / 3R targets (book: RRR ≥ 2:1–3:1).
+   `ArmWindowBars`. An opposite MSS while armed = **failed shift**: the setup is
+   cancelled immediately (`CancelOnOppositeMss`) and a ⚠️ Failed MSS alert fires —
+   structural invalidation, not just a clock timeout.
+3. **Return to zone** — first tick into aligned, unmitigated FVG/OB zone(s) on the
+   correct side of equilibrium (± `PdTolerancePercent` band) → tiered 🟢/🔴 alert:
+   Daily/Weekly confluence = A++ (🟢🟢🟢), any HTF = A+ (🟢🟢), LTF-only = B (🟢),
+   listing the full zone stack and PD status, with entry, SL
+   (`zone edge ± SlBufferTicks`) and 2R / 3R targets (book: RRR ≥ 2:1–3:1).
+   Equilibrium always comes from an order-corrected dealing range (never inverted).
 
 The alert deliberately asks for lower-timeframe confirmation (rejection wick /
 candlestick pattern / LTF MSS) — the book’s checklist requires confirmation before entry.

@@ -599,6 +599,7 @@ namespace IctSmc
                         Type = ZoneType.BullFvg,
                         IsHtf = true,
                         HtfLabel = agg.Label,
+                        HtfMinutes = agg.Minutes,
                         StartBar = c.FirstChartBar,
                         Top = b.Low,
                         Bottom = a.High
@@ -611,6 +612,7 @@ namespace IctSmc
                         Type = ZoneType.BearFvg,
                         IsHtf = true,
                         HtfLabel = agg.Label,
+                        HtfMinutes = agg.Minutes,
                         StartBar = c.FirstChartBar,
                         Top = a.Low,
                         Bottom = b.High
@@ -639,6 +641,7 @@ namespace IctSmc
                             Type = bullish ? ZoneType.BullOrderBlock : ZoneType.BearOrderBlock,
                             IsHtf = true,
                             HtfLabel = agg.Label,
+                        HtfMinutes = agg.Minutes,
                             StartBar = c.FirstChartBar,
                             Top = ObStyle == ObZoneStyle.Body ? Math.Max(c.Open, c.Close) : c.High,
                             Bottom = ObStyle == ObZoneStyle.Body ? Math.Min(c.Open, c.Close) : c.Low

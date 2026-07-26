@@ -56,6 +56,8 @@ namespace IctSmc
         public bool IsHtf;
         /// <summary>Human label of the HTF layer this zone belongs to ("4H", "D", …). Empty for chart-TF zones.</summary>
         public string HtfLabel = "";
+        /// <summary>Minutes of the HTF layer (0 for chart-TF zones). Drives confluence scoring.</summary>
+        public int HtfMinutes;
         public int StartBar;
         public decimal Top;
         public decimal Bottom;
