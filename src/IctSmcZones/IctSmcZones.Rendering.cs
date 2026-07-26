@@ -25,7 +25,6 @@ namespace IctSmc
         private const int TouchedZoneAlpha = 30;
         private const int MitigatedZoneAlpha = 14;
         private const int PdShadeAlpha = 10;
-        private const int LabelBackdropAlpha = 150;
 
         protected override void OnRender(RenderContext context, DrawingLayouts layout)
         {
@@ -57,12 +56,7 @@ namespace IctSmc
         private void RenderHtfBadge(RenderContext context, Rectangle region)
         {
             var text = string.IsNullOrEmpty(_htfInfo) ? "HTF: measuring chart timeframe…" : _htfInfo;
-            var size = context.MeasureString(text, ZoneFont);
-            var rect = new Rectangle(region.Left + 8, region.Top + 8, size.Width + 12, size.Height + 6);
-
-            context.FillRectangle(Color.FromArgb(150, 20, 20, 20), rect);
-            context.DrawRectangle(new RenderPen(Color.FromArgb(90, Color.White)), rect);
-            context.DrawString(text, ZoneFont, Color.FromArgb(235, Color.White), rect.X + 6, rect.Y + 3);
+            context.DrawString(text, ZoneFont, Color.FromArgb(190, 200, 200, 200), region.Left + 10, region.Top + 8);
         }
 
         #region Zones
@@ -196,9 +190,6 @@ namespace IctSmc
 
             var textX = rect.Left + (rect.Width - size.Width) / 2;
             var textY = rect.Top + (rect.Height - size.Height) / 2;
-
-            var pill = new Rectangle(textX - 4, textY - 1, size.Width + 8, size.Height + 2);
-            context.FillRectangle(Color.FromArgb(LabelBackdropAlpha, 12, 12, 12), pill);
 
             var labelColor = zone.IsHtf ? HtfBorderColor : baseColor;
             context.DrawString(zone.Tag, ZoneFont, Color.FromArgb(240, labelColor), textX, textY);
