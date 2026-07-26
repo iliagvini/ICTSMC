@@ -25,6 +25,9 @@ institutional ICT extensions the book only hints at) to the exact place in the c
 - bearish: `High[b] < Low[b-2]`, zone `[High[b] … Low[b-2]]`
 - noise filter: gap ≥ max(`MinFvgTicks × tick`, `ATR × MinFvgAtrFraction`)
 - the 50% midline (ICT “consequent encroachment”) is drawn dotted inside each zone.
+- **Inversion FVGs** (`Detection.cs → ApplyBodyCloseMitigation`): a body close through
+  a gap flips it (BullFvg → BearIfvg resistance, BearFvg → BullIfvg support), carrying
+  any HTF layer label; inversions never re-invert. Toggle `IfvgEnabled`.
 
 ## 3. Order Blocks
 
@@ -94,7 +97,9 @@ State machine in `Intrabar.cs`:
 2. **MSS** in the opposite direction within `SweepToMssWindow` bars → model armed for
    `ArmWindowBars`. An opposite MSS while armed = **failed shift**: the setup is
    cancelled immediately (`CancelOnOppositeMss`) and a ⚠️ Failed MSS alert fires —
-   structural invalidation, not just a clock timeout.
+   structural invalidation, not just a clock timeout. With `ArmOnFailedMss` (default
+   on) the trapped traders count as the liquidity precursor and the opposite side is
+   auto-armed on the spot (trap/IFVG continuation entry).
 3. **Return to zone** — first tick into aligned, unmitigated FVG/OB zone(s) on the
    correct side of equilibrium (± `PdTolerancePercent` band) → tiered 🟢/🔴 alert:
    Daily/Weekly confluence = A++ (🟢🟢🟢), any HTF = A+ (🟢🟢), LTF-only = B (🟢),

@@ -129,43 +129,53 @@ namespace IctSmc
             if (!EntryModelEnabled || !evt.IsMss)
                 return;
 
-            // An MSS is fresh structural information for BOTH sides:
-            // it arms its own direction and it proves any opposite armed setup was
-            // built on a failed shift — cancel it instead of letting it expire by clock.
+            // An MSS is fresh structural information for BOTH sides: it proves any
+            // opposite armed setup was built on a failed shift (cancel it), and — with
+            // ArmOnFailedMss — the traders trapped in that failure ARE the liquidity,
+            // so the failed shift itself counts as the sweep precursor for the new side
+            // (the trap / IFVG continuation entry).
             if (evt.Bullish)
             {
+                var trappedShorts = false;
+
                 if (CancelOnOppositeMss)
                 {
-                    var wasArmed = _armedBearUntil >= evt.Bar;
+                    trappedShorts = _armedBearUntil >= evt.Bar;
                     _armedBearUntil = -1;
                     _pendingBearSweepBar = -1;
 
-                    if (wasArmed && AlertOnFailedMss)
-                        Fire("⚠️ Failed bearish MSS — armed SHORT setup cancelled by a bullish MSS. " +
-                             "Failed shifts often fuel the opposite move: watch the new long side.");
+                    if (trappedShorts && AlertOnFailedMss)
+                        Fire("⚠️ Failed bearish MSS — armed SHORT setup cancelled by a bullish MSS." +
+                             (ArmOnFailedMss
+                                 ? " Long side auto-armed off the trapped shorts (trap/IFVG entry)."
+                                 : " Failed shifts often fuel the opposite move: watch the new long side."));
                 }
 
                 var sweepOk = !RequireSweepForEntry ||
                               (_pendingBullSweepBar > 0 && evt.Bar - _pendingBullSweepBar <= SweepToMssWindow);
-                if (sweepOk)
+                if (sweepOk || (ArmOnFailedMss && trappedShorts))
                     _armedBullUntil = evt.Bar + ArmWindowBars;
             }
             else
             {
+                var trappedLongs = false;
+
                 if (CancelOnOppositeMss)
                 {
-                    var wasArmed = _armedBullUntil >= evt.Bar;
+                    trappedLongs = _armedBullUntil >= evt.Bar;
                     _armedBullUntil = -1;
                     _pendingBullSweepBar = -1;
 
-                    if (wasArmed && AlertOnFailedMss)
-                        Fire("⚠️ Failed bullish MSS — armed LONG setup cancelled by a bearish MSS. " +
-                             "Failed shifts often fuel the opposite move: watch the new short side.");
+                    if (trappedLongs && AlertOnFailedMss)
+                        Fire("⚠️ Failed bullish MSS — armed LONG setup cancelled by a bearish MSS." +
+                             (ArmOnFailedMss
+                                 ? " Short side auto-armed off the trapped longs (trap/IFVG entry)."
+                                 : " Failed shifts often fuel the opposite move: watch the new short side."));
                 }
 
                 var sweepOk = !RequireSweepForEntry ||
                               (_pendingBearSweepBar > 0 && evt.Bar - _pendingBearSweepBar <= SweepToMssWindow);
-                if (sweepOk)
+                if (sweepOk || (ArmOnFailedMss && trappedLongs))
                     _armedBearUntil = evt.Bar + ArmWindowBars;
             }
         }

@@ -12,6 +12,7 @@ candle to close.
 | **Liquidity** (Ch. 3) | BSL above swing highs / SSL below swing lows, merged into **equal-highs/lows pools** (EQH/EQL), dashed lines until taken |
 | **Liquidity sweep vs. run** (Ch. 3) | Intrabar cross detection; on candle close it is classified: closed back inside = **sweep (trap)**, closed through = **run** |
 | **Fair Value Gaps** (Ch. 4) | 3-candle imbalance with tick + ATR minimum-size filters, midline (consequent encroachment) shown, configurable mitigation |
+| **Inversion FVGs (IFVG)** | A body close through a gap flips its polarity: failed bullish FVG → resistance, failed bearish FVG → support; distinct teal/purple colors; failed MSS also auto-arms the opposite entry side (trap entry, toggleable) |
 | **Order Blocks** (Ch. 5) | Last opposite-colored candle before a displacement that **breaks structure**; body-only (open↔close, as taught) or full-range zones |
 | **BoS / MSS** (Ch. 6) | Fractal swings → close-through breaks; continuation = BoS (dashed), reversal = MSS/CHoCH (solid, stronger) |
 | **Entry model** (Ch. 7) | State machine: *liquidity sweep → MSS → price returns to aligned FVG/OB in the correct half of the range* → entry alert with SL + 2R/3R targets |
@@ -73,7 +74,12 @@ Copy `src/IctSmcZones/bin/Release/IctSmcZones.dll` into
   the mode of bar-open time deltas (robust to session gaps); on tick/volume/range
   charts the median bar duration is rounded up to a standard TF — verify via the badge
 - **Entry model** — require sweep, sweep→MSS and MSS→entry windows,
-  premium/discount filter, SL buffer ticks
+  premium/discount filter + tolerance, opposite-MSS cancellation, failed-MSS trap
+  arming (IFVG logic), SL buffer ticks
+- **Palette** — every zone family has its own hue so the chart reads at a glance:
+  OB green/red, FVG blue/orange, IFVG teal/purple, HTF zones framed with a gold
+  border on top of their type color; labels auto-hide when a zone is too small,
+  so zooming out never leaves orphaned text
 
 ## Repository layout
 

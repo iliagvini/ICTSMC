@@ -299,27 +299,81 @@ namespace IctSmc
                 _zones.Remove(stale);
         }
 
-        /// <summary>BodyClose mitigation can only be judged on a finalized candle.</summary>
+        /// <summary>
+        /// Body-close logic can only be judged on a finalized candle. Two jobs here:
+        /// BodyClose-rule mitigation, and Inversion-FVG creation — a candle body
+        /// closing through a fair value gap flips its polarity (failed bullish gap
+        /// becomes resistance, failed bearish gap becomes support). The trapped
+        /// traders inside the broken gap are the fuel of the new zone.
+        /// </summary>
         private void ApplyBodyCloseMitigation(int bar)
         {
             var candle = GetCandle(bar);
             var bodyLow = Math.Min(candle.Open, candle.Close);
             var bodyHigh = Math.Max(candle.Open, candle.Close);
 
+            var inversions = new List<Zone>();
+
             foreach (var zone in _zones)
             {
-                if (zone.State == ZoneState.Mitigated || zone.StartBar >= bar)
+                if (zone.StartBar >= bar)
                     continue;
 
                 var rule = zone.IsOrderBlock ? ObMitigation : FvgMitigation;
-                if (rule != MitigationRule.BodyClose)
-                    continue;
+                if (zone.State != ZoneState.Mitigated && rule == MitigationRule.BodyClose)
+                {
+                    if (zone.IsBullish && bodyLow < zone.Bottom)
+                        Mitigate(zone, bar);
+                    else if (!zone.IsBullish && bodyHigh > zone.Top)
+                        Mitigate(zone, bar);
+                }
 
-                if (zone.IsBullish && bodyLow < zone.Bottom)
-                    Mitigate(zone, bar);
-                else if (!zone.IsBullish && bodyHigh > zone.Top)
-                    Mitigate(zone, bar);
+                // IFVG: only plain FVGs invert (an inversion never re-inverts), and only
+                // around the moment they are actually broken — a body close through the
+                // gap now, or within a few bars of a wick-based mitigation.
+                if (IfvgEnabled && !zone.Inverted &&
+                    zone.Type is ZoneType.BullFvg or ZoneType.BearFvg &&
+                    (zone.State != ZoneState.Mitigated || (zone.EndBar.HasValue && bar - zone.EndBar.Value <= 3)))
+                {
+                    if (zone.Type == ZoneType.BullFvg && bodyLow < zone.Bottom)
+                    {
+                        zone.Inverted = true;
+                        if (zone.State != ZoneState.Mitigated)
+                            Mitigate(zone, bar);
+
+                        inversions.Add(new Zone
+                        {
+                            Type = ZoneType.BearIfvg,
+                            IsHtf = zone.IsHtf,
+                            HtfLabel = zone.HtfLabel,
+                            HtfMinutes = zone.HtfMinutes,
+                            StartBar = bar,
+                            Top = zone.Top,
+                            Bottom = zone.Bottom
+                        });
+                    }
+                    else if (zone.Type == ZoneType.BearFvg && bodyHigh > zone.Top)
+                    {
+                        zone.Inverted = true;
+                        if (zone.State != ZoneState.Mitigated)
+                            Mitigate(zone, bar);
+
+                        inversions.Add(new Zone
+                        {
+                            Type = ZoneType.BullIfvg,
+                            IsHtf = zone.IsHtf,
+                            HtfLabel = zone.HtfLabel,
+                            HtfMinutes = zone.HtfMinutes,
+                            StartBar = bar,
+                            Top = zone.Top,
+                            Bottom = zone.Bottom
+                        });
+                    }
+                }
             }
+
+            foreach (var inversion in inversions)
+                AddZone(inversion);
 
             // Classify finished sweeps: close back inside = trap, close through = run.
             foreach (var level in _liquidity.Where(l => l.Swept && l.SweptBar == bar && l.WasTrap == null))

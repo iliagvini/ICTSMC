@@ -148,6 +148,20 @@ and volatility regimes; micro-gaps that get filled by spread noise never plot.
   price has traded through its far edge — partial fills leave the rest of the gap valid.
   Alternatives: `AnyTouch`, `Midline`, `BodyClose`.
 
+### 4.4 Inversion FVGs (IFVG) **[extension]**
+
+When a candle **body closes through** a fair value gap, the gap has *failed* — and the
+traders who bought/sold inside it are trapped. The zone flips polarity:
+
+- broken **bullish** FVG → **IFVG▼** resistance (trapped longs sell into any retest);
+- broken **bearish** FVG → **IFVG▲** support.
+
+Rules: only plain FVGs invert (an inversion never re-inverts); the flip must happen at
+the break or within 3 bars of a wick-based mitigation; HTF gaps invert into HTF IFVGs,
+inheriting their layer label. IFVGs are full zones — drawn in their own colors
+(teal ▲ / purple ▼), touch-alerted, and eligible for entry-model matches and confluence
+scoring like any other zone. Toggle: `IfvgEnabled` (default on).
+
 ---
 
 ## 5. Layer 4 — Order Blocks (Ch. 5)
@@ -278,6 +292,12 @@ armed (or vice versa), the armed setup was built on a **failed shift** — it is
 immediately (`CancelOnOppositeMss`, default on) and a ⚠️ *Failed MSS* alert fires,
 because a failed shift is itself one of the strongest seeds of the opposite setup (it is
 how breaker-block reversals form). The stale sweep priming is cleared with it.
+
+**Trap arming (`ArmOnFailedMss`, default on).** The traders trapped in the failed shift
+*are* the liquidity — so the failure itself counts as the sweep precursor and the new
+side is **auto-armed** on the spot. Sweep → MSS → failure → the opposite entry model is
+live immediately, typically resolving into a retest of an IFVG or breaker-style zone.
+Turn it off to require a literal BSL/SSL sweep on the new side before arming.
 
 **Stage 3 — Entry: return to the footprint.**
 While armed, the **first tick** into *aligned* zones triggers the signal. Aligned =

@@ -61,7 +61,9 @@ namespace IctSmc
 
         private void RenderZones(RenderContext context, Rectangle region, int lastBar)
         {
-            foreach (var zone in _zones)
+            // HTF zones are painted first so chart-TF zones sit crisply on top of
+            // them — stacked confluence reads as layers instead of a color soup.
+            foreach (var zone in _zones.OrderByDescending(z => z.IsHtf).ThenBy(z => z.StartBar))
             {
                 if (zone.IsOrderBlock && !ShowOb)
                     continue;
@@ -83,7 +85,7 @@ namespace IctSmc
                 // Clip to the visible chart region.
                 x1 = Math.Max(x1, region.Left);
                 x2 = Math.Min(x2, region.Right);
-                if (x2 <= x1 || y2 < region.Top || y1 > region.Bottom)
+                if (x2 <= x1 || Math.Max(y1, y2) < region.Top || Math.Min(y1, y2) > region.Bottom)
                     continue;
 
                 var baseColor = ZoneColor(zone);
@@ -97,16 +99,20 @@ namespace IctSmc
                 if (zone.IsHtf && zone.State != ZoneState.Mitigated)
                     alpha += HtfExtraAlpha;
 
-                var rect = new Rectangle(x1, Math.Min(y1, y2), x2 - x1, Math.Max(1, Math.Abs(y2 - y1)));
+                // Min height 2 px so zoomed-out zones stay visible as crisp strips.
+                var rect = new Rectangle(x1, Math.Min(y1, y2), x2 - x1, Math.Max(2, Math.Abs(y2 - y1)));
 
                 context.FillRectangle(Color.FromArgb(alpha, baseColor), rect);
 
-                var borderWidth = zone.IsHtf ? 2 : 1;
-                var borderPen = new RenderPen(Color.FromArgb(zone.State == ZoneState.Mitigated ? 60 : 160, baseColor), borderWidth);
+                // HTF zones carry a distinct gold border so LTF vs HTF is readable
+                // at any zoom level, independent of the fill hue.
+                var borderColor = zone.IsHtf ? HtfBorderColor : baseColor;
+                var borderAlpha = zone.State == ZoneState.Mitigated ? 60 : zone.IsHtf ? 200 : 160;
+                var borderPen = new RenderPen(Color.FromArgb(borderAlpha, borderColor), zone.IsHtf ? 2 : 1);
                 context.DrawRectangle(borderPen, rect);
 
-                // Midline (consequent encroachment) for active zones.
-                if (zone.State != ZoneState.Mitigated)
+                // Midline (consequent encroachment) — only when there is room for it.
+                if (zone.State != ZoneState.Mitigated && rect.Width >= 14 && rect.Height >= 8)
                 {
                     var midY = ChartInfo.GetYByPrice(zone.Mid, false);
                     if (midY > region.Top && midY < region.Bottom)
@@ -116,11 +122,13 @@ namespace IctSmc
                     }
                 }
 
-                // Label inside the left edge of the zone.
-                if (rect.Height >= 10 && zone.State != ZoneState.Mitigated)
+                // Label only when it genuinely fits inside the zone — zoomed-out
+                // charts stay clean instead of collecting orphaned text.
+                if (zone.State != ZoneState.Mitigated)
                 {
-                    var labelColor = Color.FromArgb(210, baseColor);
-                    context.DrawString(zone.Tag, ZoneFont, labelColor, x1 + 3, rect.Top + 1);
+                    var size = context.MeasureString(zone.Tag, ZoneFont);
+                    if (rect.Width >= size.Width + 8 && rect.Height >= size.Height + 2)
+                        context.DrawString(zone.Tag, ZoneFont, Color.FromArgb(220, baseColor), x1 + 4, rect.Top + 2);
                 }
             }
         }
@@ -130,7 +138,9 @@ namespace IctSmc
             ZoneType.BullOrderBlock => BullObColor,
             ZoneType.BearOrderBlock => BearObColor,
             ZoneType.BullFvg => BullFvgColor,
-            _ => BearFvgColor
+            ZoneType.BearFvg => BearFvgColor,
+            ZoneType.BullIfvg => BullIfvgColor,
+            _ => BearIfvgColor
         };
 
         #endregion
@@ -166,10 +176,11 @@ namespace IctSmc
 
                 if (!level.Swept)
                 {
-                    context.DrawString(label, ZoneFont, Color.FromArgb(200, color), x1 + 3,
-                        level.BuySide ? y - 13 : y + 2);
+                    if (x2 - x1 >= 40)
+                        context.DrawString(label, ZoneFont, Color.FromArgb(200, color), x1 + 3,
+                            level.BuySide ? y - 13 : y + 2);
                 }
-                else if (level.SweptBar.HasValue)
+                else if (level.SweptBar.HasValue && x2 - x1 >= 24)
                 {
                     // Mark the exact sweep with an ✕ and note whether it trapped traders.
                     var sweepTag = level.WasTrap == true ? "✕ sweep" : "✕ run";
@@ -206,10 +217,13 @@ namespace IctSmc
 
                 context.DrawLine(pen, x1, y, x2, y);
 
-                var label = evt.IsMss ? "MSS" : "BoS";
-                var size = context.MeasureString(label, StructureFont);
-                var textY = evt.Bullish ? y - size.Height - 1 : y + 2;
-                context.DrawString(label, StructureFont, Color.FromArgb(230, color), x2 - size.Width, textY);
+                if (x2 - x1 >= 20)
+                {
+                    var label = evt.IsMss ? "MSS" : "BoS";
+                    var size = context.MeasureString(label, StructureFont);
+                    var textY = evt.Bullish ? y - size.Height - 1 : y + 2;
+                    context.DrawString(label, StructureFont, Color.FromArgb(230, color), x2 - size.Width, textY);
+                }
             }
         }
 

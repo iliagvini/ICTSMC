@@ -8,7 +8,11 @@ namespace IctSmc
         BullOrderBlock,
         BearOrderBlock,
         BullFvg,
-        BearFvg
+        BearFvg,
+        /// <summary>Inversion FVG: a broken bearish FVG flipped into support.</summary>
+        BullIfvg,
+        /// <summary>Inversion FVG: a broken bullish FVG flipped into resistance.</summary>
+        BearIfvg
     }
 
     /// <summary>Lifecycle of a zone.</summary>
@@ -66,8 +70,10 @@ namespace IctSmc
         public int? EndBar;
         public bool CreatedAlerted;
         public bool TouchAlerted;
+        /// <summary>Set once this FVG has spawned its inversion zone (each gap inverts at most once).</summary>
+        public bool Inverted;
 
-        public bool IsBullish => Type is ZoneType.BullOrderBlock or ZoneType.BullFvg;
+        public bool IsBullish => Type is ZoneType.BullOrderBlock or ZoneType.BullFvg or ZoneType.BullIfvg;
         public bool IsOrderBlock => Type is ZoneType.BullOrderBlock or ZoneType.BearOrderBlock;
         public decimal Mid => (Top + Bottom) / 2m;
 
@@ -80,7 +86,9 @@ namespace IctSmc
                     ZoneType.BullOrderBlock => "OB▲",
                     ZoneType.BearOrderBlock => "OB▼",
                     ZoneType.BullFvg => "FVG▲",
-                    _ => "FVG▼"
+                    ZoneType.BearFvg => "FVG▼",
+                    ZoneType.BullIfvg => "IFVG▲",
+                    _ => "IFVG▼"
                 };
                 return IsHtf ? $"{(string.IsNullOrEmpty(HtfLabel) ? "HTF" : HtfLabel)} {core}" : core;
             }

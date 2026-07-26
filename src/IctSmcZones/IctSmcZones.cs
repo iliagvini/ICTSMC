@@ -127,11 +127,20 @@ namespace IctSmc
         [Display(GroupName = GrpFvg, Name = "Mitigation rule", Order = 330)]
         public MitigationRule FvgMitigation { get; set; } = MitigationRule.FullFill;
 
+        [Display(GroupName = GrpFvg, Name = "Inversion FVGs (IFVG)", Order = 335)]
+        public bool IfvgEnabled { get; set; } = true;
+
         [Display(GroupName = GrpFvg, Name = "Bullish FVG color", Order = 340)]
         public Color BullFvgColor { get; set; } = Color.FromArgb(255, 52, 152, 219);
 
         [Display(GroupName = GrpFvg, Name = "Bearish FVG color", Order = 350)]
         public Color BearFvgColor { get; set; } = Color.FromArgb(255, 230, 126, 34);
+
+        [Display(GroupName = GrpFvg, Name = "Bullish IFVG color", Order = 360)]
+        public Color BullIfvgColor { get; set; } = Color.FromArgb(255, 26, 188, 156);
+
+        [Display(GroupName = GrpFvg, Name = "Bearish IFVG color", Order = 370)]
+        public Color BearIfvgColor { get; set; } = Color.FromArgb(255, 155, 89, 182);
 
         #endregion
 
@@ -257,6 +266,9 @@ namespace IctSmc
         [Range(0, 10)]
         public decimal HtfDisplacementFactor { get; set; } = 1.3m;
 
+        [Display(GroupName = GrpHtf, Name = "HTF zone border color", Order = 745)]
+        public Color HtfBorderColor { get; set; } = Color.FromArgb(255, 241, 196, 15);
+
         [Display(GroupName = GrpHtf, Name = "Max HTF zones per layer", Order = 750)]
         [Range(1, 100)]
         public int MaxHtfZones { get; set; } = 12;
@@ -291,6 +303,9 @@ namespace IctSmc
 
         [Display(GroupName = GrpSignal, Name = "Opposite MSS cancels armed setup", Order = 845)]
         public bool CancelOnOppositeMss { get; set; } = true;
+
+        [Display(GroupName = GrpSignal, Name = "Failed MSS arms opposite side (trap entry)", Order = 847)]
+        public bool ArmOnFailedMss { get; set; } = true;
 
         [Display(GroupName = GrpSignal, Name = "Stop-loss buffer (ticks)", Order = 850)]
         [Range(0, 100)]
