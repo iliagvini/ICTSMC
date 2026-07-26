@@ -46,10 +46,17 @@ freeze the chart.
 
 ## Build & install
 
-Requirements: .NET 8 SDK, ATAS platform installed.
+Requirements: .NET 10 SDK (ATAS X) or .NET 8 SDK (older ATAS Platform), ATAS installed.
 
 ```bash
-dotnet build src/IctSmcZones/IctSmcZones.csproj -c Release -p:AtasPath="C:\Program Files (x86)\ATAS Platform"
+# ATAS X (default — targets net10.0-windows, probes "C:\Program Files\ATAS X" automatically)
+dotnet build src/IctSmcZones/IctSmcZones.csproj -c Release
+
+# explicit path
+dotnet build src/IctSmcZones/IctSmcZones.csproj -c Release -p:AtasPath="C:\Program Files\ATAS X"
+
+# older .NET 8-based ATAS Platform
+dotnet build src/IctSmcZones/IctSmcZones.csproj -c Release -p:AtasTfm=net8.0-windows -p:AtasPath="C:\Program Files (x86)\ATAS Platform"
 ```
 
 Copy `src/IctSmcZones/bin/Release/IctSmcZones.dll` into
