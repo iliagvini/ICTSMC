@@ -205,24 +205,36 @@ namespace IctSmc
         }
 
         /// <summary>
-        /// Line labels (BoS/MSS, BSL/SSL, Sweep/Run) follow the exact same centering
-        /// contract as zone labels: horizontally centered on the segment, vertically
-        /// centered ON the line, on a backdrop pill, hidden when they cannot fit.
+        /// Standard ICT line style: the line splits around its centered label —
+        /// `---- BoS ----` — with the text sitting DIRECTLY on the chart (no
+        /// backdrop box). If the segment is too short to host the label, the
+        /// plain line is drawn without text.
         /// </summary>
-        private void DrawCenteredLineLabel(RenderContext context, string text, Color color,
+        private void DrawLabeledLine(RenderContext context, RenderPen pen, string text, Color textColor,
             int x1, int x2, int y, Rectangle region)
         {
-            var size = context.MeasureString(text, StructureFont);
-            if (x2 - x1 < size.Width + 10)
+            if (string.IsNullOrEmpty(text))
+            {
+                context.DrawLine(pen, x1, y, x2, y);
                 return;
+            }
 
+            var size = context.MeasureString(text, StructureFont);
+            if (x2 - x1 < size.Width + 18)
+            {
+                context.DrawLine(pen, x1, y, x2, y);
+                return;
+            }
+
+            const int gap = 5;
             var textX = x1 + (x2 - x1 - size.Width) / 2;
-            var textY = y - size.Height / 2;
-            textY = Math.Max(region.Top + 1, Math.Min(textY, region.Bottom - size.Height - 1));
 
-            var pill = new Rectangle(textX - 4, textY - 1, size.Width + 8, size.Height + 2);
-            context.FillRectangle(Color.FromArgb(LabelBackdropAlpha, 12, 12, 12), pill);
-            context.DrawString(text, StructureFont, Color.FromArgb(235, color), textX, textY);
+            context.DrawLine(pen, x1, y, textX - gap, y);
+            context.DrawLine(pen, textX + size.Width + gap, y, x2, y);
+
+            var textY = Math.Max(region.Top + 1,
+                Math.Min(y - size.Height / 2, region.Bottom - size.Height - 1));
+            context.DrawString(text, StructureFont, textColor, textX, textY);
         }
 
         private Color ZoneColor(Zone zone) => zone.Type switch
@@ -241,6 +253,12 @@ namespace IctSmc
 
         private void RenderLiquidity(RenderContext context, Rectangle region, int lastBar)
         {
+            // Liquidity lines track price like zones do: unswept levels stop one
+            // bar past the live candle instead of running to the screen edge.
+            var xLast = ChartInfo.GetXByBar(lastBar, false);
+            var barWidth = lastBar > 0 ? Math.Max(2, xLast - ChartInfo.GetXByBar(lastBar - 1, false)) : 4;
+            var xLive = Math.Min(region.Right, xLast + barWidth * 2);
+
             foreach (var level in _liquidity)
             {
                 // Swept liquidity is history — it fades out after a short window.
@@ -256,7 +274,7 @@ namespace IctSmc
                 var x1 = Math.Max(ChartInfo.GetXByBar(level.StartBar, false), region.Left);
                 var x2 = level.Swept && level.SweptBar.HasValue
                     ? Math.Min(ChartInfo.GetXByBar(level.SweptBar.Value, false), region.Right)
-                    : region.Right;
+                    : xLive;
 
                 if (x2 <= x1)
                     continue;
@@ -264,20 +282,21 @@ namespace IctSmc
                 var color = level.BuySide ? BslColor : SslColor;
                 var alpha = level.Swept ? 70 : 170;
                 var width = level.IsEqual ? 2 : 1;
-
-                context.DrawLine(new RenderPen(Color.FromArgb(alpha, color), width, DashStyle.Dash), x1, y, x2, y);
+                var pen = new RenderPen(Color.FromArgb(alpha, color), width, DashStyle.Dash);
 
                 if (!level.Swept)
                 {
                     var label = level.BuySide
                         ? (level.IsEqual ? "EQH · BSL" : "BSL")
                         : (level.IsEqual ? "EQL · SSL" : "SSL");
-                    DrawCenteredLineLabel(context, label, color, x1, x2, y, region);
+                    DrawLabeledLine(context, pen, label, Color.FromArgb(220, color), x1, x2, y, region);
                 }
-                else if (level.SweptBar.HasValue)
+                else
                 {
-                    var sweepTag = level.WasTrap == true ? "Sweep" : "Run";
-                    DrawCenteredLineLabel(context, sweepTag, color, x1, x2, y, region);
+                    // Only genuine sweeps (trap: closed back inside) are labeled —
+                    // runs stay unlabeled, per standard ICT chart presentation.
+                    var label = level.WasTrap == true ? "Sweep" : null;
+                    DrawLabeledLine(context, pen, label, Color.FromArgb(200, color), x1, x2, y, region);
                 }
             }
         }
@@ -309,13 +328,14 @@ namespace IctSmc
                 x1 = Math.Max(x1, region.Left);
                 x2 = Math.Min(x2, region.Right);
 
+                // `---- BoS ----` / `---- MSS ----`: dashed line split around the
+                // bare centered label. MSS keeps a heavier, brighter stroke.
                 var color = evt.Bullish ? BullStructureColor : BearStructureColor;
-                var pen = new RenderPen(Color.FromArgb(evt.IsMss ? 220 : 140, color), evt.IsMss ? 2 : 1,
-                    evt.IsMss ? DashStyle.Solid : DashStyle.Dash);
+                var pen = new RenderPen(Color.FromArgb(evt.IsMss ? 230 : 150, color),
+                    evt.IsMss ? 2 : 1, DashStyle.Dash);
 
-                context.DrawLine(pen, x1, y, x2, y);
-
-                DrawCenteredLineLabel(context, evt.IsMss ? "MSS" : "BoS", color, x1, x2, y, region);
+                DrawLabeledLine(context, pen, evt.IsMss ? "MSS" : "BoS",
+                    Color.FromArgb(240, color), x1, x2, y, region);
             }
         }
 

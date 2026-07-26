@@ -112,8 +112,9 @@ is precisely a *liquidity sweep*, and Layer 2 will catch it as such. This distin
   launches within seconds of the stop-run.
 - When that candle closes, the sweep is classified:
   - closed **back inside** the level → **sweep (trap)** — manipulation confirmed; the
-    market showed its hand; drawn as `✕ sweep`;
-  - closed **through** → **run** — real breakout pressure, drawn as `✕ run`.
+    market showed its hand; the level keeps a centered `Sweep` tag;
+  - closed **through** → **run** — real breakout pressure; runs are unlabeled on the
+    chart (the alert and journal still classify them).
 - Simultaneously the sweep **primes the entry model**: SSL taken primes **longs**
   (institutions just bought retail's panic), BSL taken primes **shorts**.
 
