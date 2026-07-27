@@ -52,6 +52,13 @@ namespace IctSmc
         private readonly Dictionary<string, List<string>> _journalPending = new();
         private readonly HashSet<string> _journalHeaderWritten = new();
 
+        // All file IO is chained into a strict FIFO queue: rows land on disk in the
+        // exact order they were journaled, and no two writes ever touch a file
+        // concurrently (unordered Task.Run appends caused out-of-order rows and, on
+        // IO contention, silently dropped batches — unacceptable for an audit trail).
+        private Task _ioChain = Task.CompletedTask;
+        private readonly object _ioChainLock = new();
+
         private readonly List<SignalRecord> _openSignals = new();
         private readonly List<SignalRecord> _resolvedSignals = new();
 
@@ -151,18 +158,29 @@ namespace IctSmc
 
         private void FlushAsync(string path, List<string> lines)
         {
-            _ = Task.Run(() =>
+            EnqueueIo(() =>
             {
-                try
-                {
-                    Directory.CreateDirectory(Path.GetDirectoryName(path));
-                    File.AppendAllLines(path, lines);
-                }
-                catch
-                {
-                    // Journaling must never disturb the chart thread or trading logic.
-                }
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.AppendAllLines(path, lines);
             });
+        }
+
+        private void EnqueueIo(Action work)
+        {
+            lock (_ioChainLock)
+            {
+                _ioChain = _ioChain.ContinueWith(_ =>
+                {
+                    try
+                    {
+                        work();
+                    }
+                    catch
+                    {
+                        // Journaling must never disturb the chart thread or trading logic.
+                    }
+                }, TaskScheduler.Default);
+            }
         }
 
         /// <summary>Flush any batched historical rows (called when a bar completes).</summary>
@@ -378,17 +396,10 @@ namespace IctSmc
             var path = Path.Combine(JournalDir, $"{_sessionStamp}-analytics.csv");
             var text = sb.ToString();
 
-            _ = Task.Run(() =>
+            EnqueueIo(() =>
             {
-                try
-                {
-                    Directory.CreateDirectory(Path.GetDirectoryName(path));
-                    File.WriteAllText(path, text);
-                }
-                catch
-                {
-                    // Never let IO problems reach the chart thread.
-                }
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.WriteAllText(path, text);
             });
         }
 
