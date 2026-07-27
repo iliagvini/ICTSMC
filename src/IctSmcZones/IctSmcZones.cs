@@ -77,6 +77,12 @@ namespace IctSmc
         private string _armedBullSource = "";   // "Sweep" / "TrapArm" / "Sweep+Trap" / "MSS-only"
         private string _armedBearSource = "";
 
+        // Impulse-leg dealing range: re-anchored on every structure break so EQ
+        // tracks the CURRENT leg instead of a stale pre-break extreme.
+        private int _legDirection;              // +1 bull leg, -1 bear leg, 0 none yet
+        private SwingPoint _legAnchor;          // origin extreme of the current leg
+        private SwingPoint _legExtreme;         // running extreme since the break (completed bars only)
+
         #endregion
 
         #region General settings
@@ -222,6 +228,9 @@ namespace IctSmc
 
         [Display(GroupName = GrpPd, Name = "Shade premium/discount halves", Order = 605)]
         public bool PdShadingEnabled { get; set; } = false;
+
+        [Display(GroupName = GrpPd, Name = "Anchor dealing range to impulse leg", Order = 608)]
+        public bool DealingRangeFromLeg { get; set; } = true;
 
         [Display(GroupName = GrpPd, Name = "Premium shade color", Order = 610)]
         public Color PremiumColor { get; set; } = Color.FromArgb(255, 231, 76, 60);
@@ -448,6 +457,9 @@ namespace IctSmc
             _armedBearAtBar = -1;
             _armedBullSource = "";
             _armedBearSource = "";
+            _legDirection = 0;
+            _legAnchor = null;
+            _legExtreme = null;
             InitJournalSession();
         }
 

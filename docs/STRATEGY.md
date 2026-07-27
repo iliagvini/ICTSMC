@@ -54,8 +54,11 @@ high/low. If it flips the tracked trend it is an **MSS** (solid, bold), otherwis
 
 > “Premium (above 50% of range) → look for shorts. Discount (below 50%) → longs.”
 
-Dealing range = last confirmed swing low ↔ swing high. `EQ 50%` line plus subtle
-premium/discount shading (`Rendering.cs → RenderPremiumDiscount`). With
+Dealing range = the **current impulse leg** (origin extreme ↔ running extreme,
+re-anchored on every BoS/MSS — `Detection.cs → AnchorLeg`; toggle
+`DealingRangeFromLeg`), falling back to the last confirmed swing pair before the
+first break. `EQ 50%` line plus optional premium/discount shading
+(`Rendering.cs → RenderPremiumDiscount`). With
 `EntryNeedsPdAlignment` on, long signals only fire from zones whose midpoint sits at or
 below equilibrium, shorts at or above — the accumulation→manipulation→distribution cycle
 is traded on the correct side of the range.

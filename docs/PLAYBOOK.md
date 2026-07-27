@@ -204,9 +204,17 @@ An OB is only created when a **structure break** happens (Layer 1 fires BoS/MSS)
 - **Dealing range** = most recent confirmed swing low ↔ swing high.
 - **Equilibrium (EQ)** = its 50% line, drawn dash-dot with subtle red shading above
   (premium) and green below (discount).
-- The pair is **order-corrected**: after a strong one-way run the latest swing high can
-  sit below the latest swing low; the engine walks back to the nearest consistent pair,
-  so equilibrium is never computed from an inverted range.
+- **Impulse-leg anchoring (default).** The range is re-anchored on every BoS/MSS to
+  the CURRENT leg: origin extreme (the swing the move started from, extended to any
+  unconfirmed higher-high/lower-low up to the break) ↔ the running extreme since the
+  break, which extends bar by bar as the impulse grows. Equilibrium therefore tracks
+  the leg you are actually trading. Journal audit of real sessions showed the old
+  behavior (EQ hung from the stale pre-break extreme) vetoing valid post-MSS retrace
+  shorts by 32–66 points; every re-anchor is journaled as `RangeAnchored` with leg
+  high/low/EQ. Toggle: `DealingRangeFromLeg`.
+- Fallback (before the first structure break, or with the toggle off): the confirmed
+  swing pair, **order-corrected** — the engine walks back to the nearest consistent
+  high>low pair, so equilibrium is never computed from an inverted range.
 - This layer is a **filter, not a signal**: with `EntryNeedsPdAlignment` on (default),
   long entries only fire from zones whose midpoint sits at or below EQ, shorts at or
   above. A **tolerance band** (`PdTolerancePercent`, default 10% of the range) keeps
@@ -419,6 +427,7 @@ point in the entry model writes an event with exact metrics:
 | `ArmExpired` | armed window ran out untouched | source, armed-at bar, bars waited vs `ArmWindowBars` |
 | `EntryRejected` | armed + zone touched, PD filter vetoed | zone id/tag, zone mid, EQ, tolerance, exact excess/shortfall beyond the limit, arm source (latched once per zone) |
 | `SweepExpired` | sweep aged out with no MSS | sweep bar, age vs window |
+| `RangeAnchored` | dealing range re-anchored on BoS/MSS | leg high/low with their bars, resulting EQ |
 | `FailedMSS` | armed setup structurally cancelled | cancelling MSS level, armed-at bar, bars in, window remaining, trap-arm result |
 
 Every `ZoneTouch` is therefore classifiable post-hoc: fired / PD-vetoed /

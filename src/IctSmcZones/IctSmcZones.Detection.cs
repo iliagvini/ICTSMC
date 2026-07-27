@@ -19,6 +19,7 @@ namespace IctSmc
             UpdateAtr(bar);
             ConfirmSwings(bar);
             DetectStructureBreak(bar);
+            UpdateLegExtreme(bar);
             DetectFvg(bar);
             ApplyBodyCloseMitigation(bar);
             UpdateHtf(bar);
@@ -158,6 +159,7 @@ namespace IctSmc
                     IsMss = isMss
                 };
                 _structure.Add(evt);
+                AnchorLeg(evt);
                 OnStructureEvent(evt);
 
                 if (ShowOb)
@@ -179,10 +181,102 @@ namespace IctSmc
                     IsMss = isMss
                 };
                 _structure.Add(evt);
+                AnchorLeg(evt);
                 OnStructureEvent(evt);
 
                 if (ShowOb)
                     CreateOrderBlock(bar, bullish: false);
+            }
+        }
+
+        /// <summary>
+        /// Re-anchors the dealing range to the CURRENT impulse leg on every
+        /// structure break. A bearish break measures from the origin high of the
+        /// down-move (the most recent swing high, extended to any unconfirmed
+        /// higher high between it and the break) down to the running low; bullish
+        /// mirror. This keeps equilibrium structural and current instead of
+        /// hanging from a stale pre-break extreme — which was misclassifying
+        /// valid post-MSS retrace zones as "in discount" and vetoing them.
+        /// Only completed bars feed the scan, so the range is fully deterministic
+        /// across live ticks and history replay.
+        /// </summary>
+        private void AnchorLeg(StructureEvent evt)
+        {
+            var b = evt.Bar;
+
+            if (evt.Bullish)
+            {
+                var from = Math.Max(1, _lastSwingLow?.Bar ?? b - SwingPeriod * 4);
+
+                var anchorBar = from;
+                var anchorPrice = GetCandle(from).Low;
+                for (var i = from; i <= b; i++)
+                {
+                    var lo = GetCandle(i).Low;
+                    if (lo < anchorPrice) { anchorPrice = lo; anchorBar = i; }
+                }
+
+                var extremeBar = anchorBar;
+                var extremePrice = GetCandle(anchorBar).High;
+                for (var i = anchorBar; i <= b; i++)
+                {
+                    var hi = GetCandle(i).High;
+                    if (hi >= extremePrice) { extremePrice = hi; extremeBar = i; }
+                }
+
+                _legDirection = 1;
+                _legAnchor = new SwingPoint { Bar = anchorBar, Price = anchorPrice };
+                _legExtreme = new SwingPoint { Bar = extremeBar, Price = extremePrice };
+            }
+            else
+            {
+                var from = Math.Max(1, _lastSwingHigh?.Bar ?? b - SwingPeriod * 4);
+
+                var anchorBar = from;
+                var anchorPrice = GetCandle(from).High;
+                for (var i = from; i <= b; i++)
+                {
+                    var hi = GetCandle(i).High;
+                    if (hi > anchorPrice) { anchorPrice = hi; anchorBar = i; }
+                }
+
+                var extremeBar = anchorBar;
+                var extremePrice = GetCandle(anchorBar).Low;
+                for (var i = anchorBar; i <= b; i++)
+                {
+                    var lo = GetCandle(i).Low;
+                    if (lo <= extremePrice) { extremePrice = lo; extremeBar = i; }
+                }
+
+                _legDirection = -1;
+                _legAnchor = new SwingPoint { Bar = anchorBar, Price = anchorPrice };
+                _legExtreme = new SwingPoint { Bar = extremeBar, Price = extremePrice };
+            }
+
+            var legHigh = _legDirection == 1 ? _legExtreme.Price : _legAnchor.Price;
+            var legLow = _legDirection == 1 ? _legAnchor.Price : _legExtreme.Price;
+            JournalEvent(b, "RangeAnchored", evt.Bullish ? "Bull" : "Bear", null, (legHigh + legLow) / 2m,
+                $"{(evt.IsMss ? "MSS" : "BoS")} re-anchor: LegHigh={legHigh} (bar {(_legDirection == 1 ? _legExtreme.Bar : _legAnchor.Bar)}), " +
+                $"LegLow={legLow} (bar {(_legDirection == 1 ? _legAnchor.Bar : _legExtreme.Bar)}), EQ={(legHigh + legLow) / 2m}");
+        }
+
+        /// <summary>Extends the current leg's running extreme as new bars complete.</summary>
+        private void UpdateLegExtreme(int bar)
+        {
+            if (_legDirection == 0 || _legExtreme == null)
+                return;
+
+            var candle = GetCandle(bar);
+
+            if (_legDirection == 1 && candle.High >= _legExtreme.Price)
+            {
+                _legExtreme.Price = candle.High;
+                _legExtreme.Bar = bar;
+            }
+            else if (_legDirection == -1 && candle.Low <= _legExtreme.Price)
+            {
+                _legExtreme.Price = candle.Low;
+                _legExtreme.Bar = bar;
             }
         }
 

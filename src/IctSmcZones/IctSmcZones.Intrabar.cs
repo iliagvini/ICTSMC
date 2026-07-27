@@ -479,14 +479,25 @@ namespace IctSmc
         }
 
         /// <summary>
-        /// Current dealing range as a properly ORDERED swing pair (high above low).
-        /// After a strong one-way run the most recent swing high can sit below the
-        /// most recent swing low; in that case the older side is walked back until a
-        /// consistent pair is found, so equilibrium is never computed from an
-        /// inverted range.
+        /// Current dealing range. With DealingRangeFromLeg (default) the range is
+        /// the CURRENT impulse leg — origin extreme to running extreme, re-anchored
+        /// on every BoS/MSS — so equilibrium is structural and current, and valid
+        /// post-MSS retrace zones are measured against the leg they belong to
+        /// rather than a stale pre-break top/bottom. Falls back to the confirmed
+        /// swing pair (order-corrected) before the first structure break or when
+        /// the leg toggle is off.
         /// </summary>
         private (SwingPoint High, SwingPoint Low)? GetDealingRange()
         {
+            if (DealingRangeFromLeg && _legDirection != 0 && _legAnchor != null && _legExtreme != null)
+            {
+                var legHigh = _legDirection == 1 ? _legExtreme : _legAnchor;
+                var legLow = _legDirection == 1 ? _legAnchor : _legExtreme;
+
+                if (legHigh.Price > legLow.Price)
+                    return (legHigh, legLow);
+            }
+
             if (_swingHighs.Count == 0 || _swingLows.Count == 0)
                 return null;
 
