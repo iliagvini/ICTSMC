@@ -409,6 +409,21 @@ resolution, R-multiple, MAE/MFE in R, bars held), and analytics (win-rate and
 expectancy grouped by zone family, layer, arm source, tier, direction). Historical
 rows are flagged HIST and act as a backtest of the identical live code path.
 
+**Decision log.** Non-fires are logged as explicitly as fires — every suppression
+point in the entry model writes an event with exact metrics:
+
+| Event | Meaning | Metrics recorded |
+|---|---|---|
+| `Armed` | a side armed after MSS | source, MSS bar/level, sweep bar, sweep age vs window, armed-until bar |
+| `ArmRejected` | MSS printed but arming failed | MSS level, whether a sweep existed, its age vs `SweepToMssWindow`, trap-arm status |
+| `ArmExpired` | armed window ran out untouched | source, armed-at bar, bars waited vs `ArmWindowBars` |
+| `EntryRejected` | armed + zone touched, PD filter vetoed | zone id/tag, zone mid, EQ, tolerance, exact excess/shortfall beyond the limit, arm source (latched once per zone) |
+| `SweepExpired` | sweep aged out with no MSS | sweep bar, age vs window |
+| `FailedMSS` | armed setup structurally cancelled | cancelling MSS level, armed-at bar, bars in, window remaining, trap-arm result |
+
+Every `ZoneTouch` is therefore classifiable post-hoc: fired / PD-vetoed /
+model-not-armed / model-expired — with the numbers to prove which.
+
 ## 13. Honest limitations
 
 - Swings confirm with a `SwingPeriod` lag; structure events therefore lag pivots. This

@@ -93,7 +93,11 @@ With journaling on (default), every session writes CSVs to
 `Documents\ATAS\ICTSMC-Journal\<instrument>\` (new file set per recalculation —
 no duplicate rows):
 
-- `*-events.csv` — zone created/touched/mitigated/inverted, sweeps, BoS/MSS, failed MSS
+- `*-events.csv` — zone created/touched/mitigated/inverted, sweeps, BoS/MSS, failed MSS,
+  **plus the full decision log**: `Armed` (source, sweep age, window), `ArmRejected`
+  (exact reason a MSS failed to arm), `ArmExpired` (bars waited), `EntryRejected`
+  (PD filter veto with zone mid vs EQ±tolerance and the exact excess), `SweepExpired` —
+  every signal that did NOT fire is explained with numbers, zero ambiguity
 - `*-signals.csv` — every entry signal with tier, arm source (Sweep / TrapArm /
   Sweep+Trap), trigger zone, entry/SL/TP2/TP3, PD status, confluence stack
 - `*-outcomes.csv` — resolution per signal (SL / TP2 / TP3 / Timeout, conservative

@@ -160,12 +160,18 @@ namespace IctSmc
                 if (CancelOnOppositeMss)
                 {
                     trappedShorts = _armedBearUntil >= evt.Bar;
-                    _armedBearUntil = -1;
-                    _pendingBearSweepBar = -1;
 
                     if (trappedShorts)
                         JournalEvent(evt.Bar, "FailedMSS", "Bear", null, evt.Level,
-                            ArmOnFailedMss ? "Short cancelled; long trap-armed" : "Short cancelled");
+                            $"Short setup cancelled by bullish MSS @ {FormatPrice(evt.Level)}; " +
+                            $"was armed at bar {_armedBearAtBar} (source={_armedBearSource}, {evt.Bar - _armedBearAtBar} bars in, " +
+                            $"{_armedBearUntil - evt.Bar} bars of window left)" +
+                            (ArmOnFailedMss ? "; long trap-armed" : ""));
+
+                    _armedBearUntil = -1;
+                    _armedBearAtBar = -1;
+                    _armedBearSource = "";
+                    _pendingBearSweepBar = -1;
 
                     if (trappedShorts && AlertOnFailedMss)
                         Fire("⚠️ Failed bearish MSS\n" +
@@ -180,10 +186,25 @@ namespace IctSmc
                 if (sweepOk || (ArmOnFailedMss && trappedShorts))
                 {
                     _armedBullUntil = evt.Bar + ArmWindowBars;
+                    _armedBullAtBar = evt.Bar;
                     _armedBullSource = hadSweep && trappedShorts ? "Sweep+Trap"
                         : hadSweep ? "Sweep"
                         : trappedShorts ? "TrapArm"
                         : "MSS-only";
+
+                    JournalEvent(evt.Bar, "Armed", "Bull", null, evt.Level,
+                        $"Source={_armedBullSource}; MssBar={evt.Bar}; " +
+                        $"SweepBar={(hadSweep ? _pendingBullSweepBar.ToString() : "none")}; " +
+                        $"SweepAge={(hadSweep ? $"{evt.Bar - _pendingBullSweepBar}/{SweepToMssWindow}" : "n/a")}; " +
+                        $"ArmedUntil=bar {_armedBullUntil} (+{ArmWindowBars})");
+                }
+                else
+                {
+                    var reason = _pendingBullSweepBar > 0
+                        ? $"sell-side sweep too old: SweepBar={_pendingBullSweepBar}, age={evt.Bar - _pendingBullSweepBar} > window {SweepToMssWindow}"
+                        : $"no sell-side sweep on record within {SweepToMssWindow} bars";
+                    JournalEvent(evt.Bar, "ArmRejected", "Bull", null, evt.Level,
+                        $"Bullish MSS @ {FormatPrice(evt.Level)} not armed; RequireSweep=on; {reason}; TrapArm={(ArmOnFailedMss ? "on, no armed short to trap" : "off")}");
                 }
             }
             else
@@ -193,12 +214,18 @@ namespace IctSmc
                 if (CancelOnOppositeMss)
                 {
                     trappedLongs = _armedBullUntil >= evt.Bar;
-                    _armedBullUntil = -1;
-                    _pendingBullSweepBar = -1;
 
                     if (trappedLongs)
                         JournalEvent(evt.Bar, "FailedMSS", "Bull", null, evt.Level,
-                            ArmOnFailedMss ? "Long cancelled; short trap-armed" : "Long cancelled");
+                            $"Long setup cancelled by bearish MSS @ {FormatPrice(evt.Level)}; " +
+                            $"was armed at bar {_armedBullAtBar} (source={_armedBullSource}, {evt.Bar - _armedBullAtBar} bars in, " +
+                            $"{_armedBullUntil - evt.Bar} bars of window left)" +
+                            (ArmOnFailedMss ? "; short trap-armed" : ""));
+
+                    _armedBullUntil = -1;
+                    _armedBullAtBar = -1;
+                    _armedBullSource = "";
+                    _pendingBullSweepBar = -1;
 
                     if (trappedLongs && AlertOnFailedMss)
                         Fire("⚠️ Failed bullish MSS\n" +
@@ -213,10 +240,25 @@ namespace IctSmc
                 if (sweepOk || (ArmOnFailedMss && trappedLongs))
                 {
                     _armedBearUntil = evt.Bar + ArmWindowBars;
+                    _armedBearAtBar = evt.Bar;
                     _armedBearSource = hadSweep && trappedLongs ? "Sweep+Trap"
                         : hadSweep ? "Sweep"
                         : trappedLongs ? "TrapArm"
                         : "MSS-only";
+
+                    JournalEvent(evt.Bar, "Armed", "Bear", null, evt.Level,
+                        $"Source={_armedBearSource}; MssBar={evt.Bar}; " +
+                        $"SweepBar={(hadSweep ? _pendingBearSweepBar.ToString() : "none")}; " +
+                        $"SweepAge={(hadSweep ? $"{evt.Bar - _pendingBearSweepBar}/{SweepToMssWindow}" : "n/a")}; " +
+                        $"ArmedUntil=bar {_armedBearUntil} (+{ArmWindowBars})");
+                }
+                else
+                {
+                    var reason = _pendingBearSweepBar > 0
+                        ? $"buy-side sweep too old: SweepBar={_pendingBearSweepBar}, age={evt.Bar - _pendingBearSweepBar} > window {SweepToMssWindow}"
+                        : $"no buy-side sweep on record within {SweepToMssWindow} bars";
+                    JournalEvent(evt.Bar, "ArmRejected", "Bear", null, evt.Level,
+                        $"Bearish MSS @ {FormatPrice(evt.Level)} not armed; RequireSweep=on; {reason}; TrapArm={(ArmOnFailedMss ? "on, no armed long to trap" : "off")}");
                 }
             }
         }
@@ -232,12 +274,39 @@ namespace IctSmc
             if (!EntryModelEnabled)
                 return;
 
-            // A sweep that never produced an MSS inside the window is stale — drop it
-            // so a much later MSS can't chain to ancient liquidity.
+            // Every state expiry leaves an explicit audit record — silence is not
+            // an audit trail.
             if (_pendingBullSweepBar > 0 && bar - _pendingBullSweepBar > SweepToMssWindow)
+            {
+                JournalEvent(bar, "SweepExpired", "SellSide", null, 0m,
+                    $"SweepBar={_pendingBullSweepBar}; age={bar - _pendingBullSweepBar} > window {SweepToMssWindow}; no bullish MSS followed");
                 _pendingBullSweepBar = -1;
+            }
+
             if (_pendingBearSweepBar > 0 && bar - _pendingBearSweepBar > SweepToMssWindow)
+            {
+                JournalEvent(bar, "SweepExpired", "BuySide", null, 0m,
+                    $"SweepBar={_pendingBearSweepBar}; age={bar - _pendingBearSweepBar} > window {SweepToMssWindow}; no bearish MSS followed");
                 _pendingBearSweepBar = -1;
+            }
+
+            if (_armedBullUntil > 0 && bar > _armedBullUntil)
+            {
+                JournalEvent(bar, "ArmExpired", "Bull", null, 0m,
+                    $"Source={_armedBullSource}; ArmedAt=bar {_armedBullAtBar}; waited {bar - _armedBullAtBar} bars (window {ArmWindowBars}); no aligned zone was touched");
+                _armedBullUntil = -1;
+                _armedBullAtBar = -1;
+                _armedBullSource = "";
+            }
+
+            if (_armedBearUntil > 0 && bar > _armedBearUntil)
+            {
+                JournalEvent(bar, "ArmExpired", "Bear", null, 0m,
+                    $"Source={_armedBearSource}; ArmedAt=bar {_armedBearAtBar}; waited {bar - _armedBearAtBar} bars (window {ArmWindowBars}); no aligned zone was touched");
+                _armedBearUntil = -1;
+                _armedBearAtBar = -1;
+                _armedBearSource = "";
+            }
 
             var candle = GetCandle(bar);
 
@@ -253,17 +322,34 @@ namespace IctSmc
 
             if (_armedBullUntil >= bar)
             {
-                var matches = _zones.Where(z =>
+                var touched = _zones.Where(z =>
                     z.State != ZoneState.Mitigated &&
                     z.IsBullish &&
                     z.StartBar < bar &&
-                    candle.Low <= z.Top &&
-                    (!EntryNeedsPdAlignment || eq == null || z.Mid <= eq.Value + tolerance)).ToList();
+                    candle.Low <= z.Top).ToList();
+
+                var matches = touched.Where(z =>
+                    !EntryNeedsPdAlignment || eq == null || z.Mid <= eq.Value + tolerance).ToList();
+
+                // Zones the PD filter vetoed — logged once per zone with the exact
+                // numbers, so every filtered entry can be audited and back-scored.
+                if (EntryNeedsPdAlignment && eq != null)
+                {
+                    foreach (var z in touched.Where(z => z.Mid > eq.Value + tolerance && !z.PdRejectLogged))
+                    {
+                        z.PdRejectLogged = true;
+                        JournalEvent(bar, "EntryRejected", "Bull", z, candle.Close,
+                            $"PD filter: zone mid {FormatPrice(z.Mid)} > limit {FormatPrice(eq.Value + tolerance)} " +
+                            $"(EQ {FormatPrice(eq.Value)} + tol {FormatPrice(tolerance)}); excess {FormatPrice(z.Mid - eq.Value - tolerance)}; " +
+                            $"ArmedSource={_armedBullSource}; ArmedAt=bar {_armedBullAtBar}");
+                    }
+                }
 
                 if (matches.Count > 0)
                 {
                     var source = _armedBullSource;
                     _armedBullUntil = -1;
+                    _armedBullAtBar = -1;
                     _pendingBullSweepBar = -1;
                     _armedBullSource = "";
                     EmitEntrySignal(matches, longSide: true, eq, tolerance, source, bar);
@@ -272,17 +358,32 @@ namespace IctSmc
 
             if (_armedBearUntil >= bar)
             {
-                var matches = _zones.Where(z =>
+                var touched = _zones.Where(z =>
                     z.State != ZoneState.Mitigated &&
                     !z.IsBullish &&
                     z.StartBar < bar &&
-                    candle.High >= z.Bottom &&
-                    (!EntryNeedsPdAlignment || eq == null || z.Mid >= eq.Value - tolerance)).ToList();
+                    candle.High >= z.Bottom).ToList();
+
+                var matches = touched.Where(z =>
+                    !EntryNeedsPdAlignment || eq == null || z.Mid >= eq.Value - tolerance).ToList();
+
+                if (EntryNeedsPdAlignment && eq != null)
+                {
+                    foreach (var z in touched.Where(z => z.Mid < eq.Value - tolerance && !z.PdRejectLogged))
+                    {
+                        z.PdRejectLogged = true;
+                        JournalEvent(bar, "EntryRejected", "Bear", z, candle.Close,
+                            $"PD filter: zone mid {FormatPrice(z.Mid)} < limit {FormatPrice(eq.Value - tolerance)} " +
+                            $"(EQ {FormatPrice(eq.Value)} - tol {FormatPrice(tolerance)}); shortfall {FormatPrice(eq.Value - tolerance - z.Mid)}; " +
+                            $"ArmedSource={_armedBearSource}; ArmedAt=bar {_armedBearAtBar}");
+                    }
+                }
 
                 if (matches.Count > 0)
                 {
                     var source = _armedBearSource;
                     _armedBearUntil = -1;
+                    _armedBearAtBar = -1;
                     _pendingBearSweepBar = -1;
                     _armedBearSource = "";
                     EmitEntrySignal(matches, longSide: false, eq, tolerance, source, bar);

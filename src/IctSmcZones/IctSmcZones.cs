@@ -72,6 +72,8 @@ namespace IctSmc
         private int _pendingBearSweepBar = -1;  // buy-side liquidity was swept (short setup precursor)
         private int _armedBullUntil = -1;
         private int _armedBearUntil = -1;
+        private int _armedBullAtBar = -1;
+        private int _armedBearAtBar = -1;
         private string _armedBullSource = "";   // "Sweep" / "TrapArm" / "Sweep+Trap" / "MSS-only"
         private string _armedBearSource = "";
 
@@ -442,6 +444,8 @@ namespace IctSmc
             _pendingBearSweepBar = -1;
             _armedBullUntil = -1;
             _armedBearUntil = -1;
+            _armedBullAtBar = -1;
+            _armedBearAtBar = -1;
             _armedBullSource = "";
             _armedBearSource = "";
             InitJournalSession();

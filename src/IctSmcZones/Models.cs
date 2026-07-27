@@ -85,6 +85,8 @@ namespace IctSmc
         public bool Inverted;
         /// <summary>First-touch journaling latch (independent of the alert toggle).</summary>
         public bool TouchLogged;
+        /// <summary>Latch: PD-filter rejection already journaled for this zone.</summary>
+        public bool PdRejectLogged;
 
         public bool IsBullish => Type is ZoneType.BullOrderBlock or ZoneType.BullFvg or ZoneType.BullIfvg;
         public bool IsOrderBlock => Type is ZoneType.BullOrderBlock or ZoneType.BearOrderBlock;
