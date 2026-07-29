@@ -258,14 +258,14 @@ namespace IctSmc
         public bool HtfEnabled
         {
             get => _htfEnabled;
-            set { _htfEnabled = value; RecalculateValues(); }
+            set { if (_htfEnabled == value) return; _htfEnabled = value; RecalculateValues(); }
         }
 
         [Display(GroupName = GrpHtf, Name = "HTF selection", Order = 705)]
         public HtfSelectionMode HtfMode
         {
             get => _htfMode;
-            set { _htfMode = value; RecalculateValues(); }
+            set { if (_htfMode == value) return; _htfMode = value; RecalculateValues(); }
         }
 
         [Display(GroupName = GrpHtf, Name = "Manual HTF (minutes, Manual mode only)", Order = 710)]
@@ -273,14 +273,14 @@ namespace IctSmc
         public int HtfMinutes
         {
             get => _htfManualMinutes;
-            set { _htfManualMinutes = Math.Max(1, value); RecalculateValues(); }
+            set { var v = Math.Max(1, value); if (_htfManualMinutes == v) return; _htfManualMinutes = v; RecalculateValues(); }
         }
 
         [Display(GroupName = GrpHtf, Name = "Auto: add second HTF layer", Order = 712)]
         public bool AutoSecondLayer
         {
             get => _autoSecondLayer;
-            set { _autoSecondLayer = value; RecalculateValues(); }
+            set { if (_autoSecondLayer == value) return; _autoSecondLayer = value; RecalculateValues(); }
         }
 
         [Display(GroupName = GrpHtf, Name = "Daily+ anchor (minutes after midnight)", Order = 714)]
@@ -288,7 +288,7 @@ namespace IctSmc
         public int DailyAnchorMinutes
         {
             get => _dailyAnchorMinutes;
-            set { _dailyAnchorMinutes = Math.Clamp(value, 0, 1439); RecalculateValues(); }
+            set { var v = Math.Clamp(value, 0, 1439); if (_dailyAnchorMinutes == v) return; _dailyAnchorMinutes = v; RecalculateValues(); }
         }
 
         [Display(GroupName = GrpHtf, Name = "HTF Fair Value Gaps", Order = 720)]
