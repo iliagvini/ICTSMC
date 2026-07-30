@@ -15,8 +15,9 @@ namespace IctSmc
     /// Everything the engine does is written to CSV files so the live system can be
     /// audited after the fact:
     ///  • events.csv    — zone lifecycle (created / touched / mitigated / inverted),
-    ///                    liquidity sweeps, BoS/MSS, failed MSS
-    ///  • signals.csv   — every entry-model signal with its full trade plan
+    ///                    liquidity sweeps, BoS/MSS, failed MSS, absorption events
+    ///  • signals.csv   — every entry-model signal with its full trade plan and the
+    ///                    order-flow snapshot at the firing tick
     ///  • outcomes.csv  — resolution of each signal: SL / TP2 / TP3 / Timeout,
     ///                    R-multiple, MAE/MFE in R, bars held, plus two shadow
     ///                    trade-management results simulated in parallel (never
@@ -71,9 +72,11 @@ namespace IctSmc
         private const string EventsHeader =
             "Time,Mode,Instrument,Event,Direction,ZoneId,ZoneTag,Layer,Top,Bottom,Price,Extra";
         private const string SignalsHeader =
-            "SignalId,Time,Mode,Instrument,Direction,Tier,ArmSource,TriggerTag,Layer,ZoneTop,ZoneBottom,Entry,SL,TP2,TP3,PdStatus,Confluence";
+            "SignalId,Time,Mode,Instrument,Direction,Tier,ArmSource,TriggerTag,Layer,ZoneTop,ZoneBottom,Entry,SL,TP2,TP3,PdStatus,Confluence," +
+            "Vol,RelVol,DeltaAtFire,DeltaPct,CVD,CvdSlope5,PocPct,Imbalances,Absorption";
         private const string OutcomesHeader =
-            "SignalId,ResolvedTime,Mode,Outcome,ExitPrice,RMultiple,BE1R_R,Partial2R_R,MAE_R,MFE_R,BarsHeld,Direction,Tier,ArmSource,TriggerTag,Layer";
+            "SignalId,ResolvedTime,Mode,Outcome,ExitPrice,RMultiple,BE1R_R,Partial2R_R,MAE_R,MFE_R,BarsHeld,Direction,Tier,ArmSource,TriggerTag,Layer," +
+            "OF_Delta5,OF_AlignedPct,OF_CvdDrift,OF_AbsorptionAtEntry";
 
         #endregion
 
@@ -263,7 +266,16 @@ namespace IctSmc
                 Num(record.Tp2),
                 Num(record.Tp3),
                 record.PdStatus,
-                Csv(record.Confluence));
+                Csv(record.Confluence),
+                record.OfCaptured ? Num(record.OfVolume) : "",
+                record.OfCaptured ? record.OfRelVolume.ToString("0.00", CultureInfo.InvariantCulture) : "",
+                record.OfCaptured && record.OfDeltaAvailable ? Num(record.OfDelta) : "",
+                record.OfCaptured && record.OfDeltaAvailable ? (record.OfDeltaShare * 100m).ToString("0.#", CultureInfo.InvariantCulture) : "",
+                record.OfCaptured && record.OfDeltaAvailable ? Num(record.OfCvd) : "",
+                record.OfCaptured && record.OfDeltaAvailable ? Num(record.OfCvdSlope5) : "",
+                record.OfCaptured && record.OfPocPct >= 0 ? record.OfPocPct.ToString("0", CultureInfo.InvariantCulture) : "",
+                Csv(record.OfImbalances),
+                Csv(record.OfAbsorption));
 
             JournalWrite("signals.csv", SignalsHeader, line);
         }
@@ -295,6 +307,18 @@ namespace IctSmc
                 {
                     s.Mfe = Math.Max(s.Mfe, s.Entry - candle.Low);
                     s.Mae = Math.Max(s.Mae, candle.High - s.Entry);
+                }
+
+                // Order-flow evolution: signed toward the trade direction, so
+                // positive = the aggressive flow agreed with the position.
+                if (s.OfCaptured && s.OfDeltaAvailable && _ofDeltaAvailable)
+                {
+                    var alignedDelta = s.Long ? candle.Delta : -candle.Delta;
+                    s.OfTrackedBars++;
+                    if (alignedDelta > 0)
+                        s.OfAlignedBars++;
+                    if (bar - s.SignalBar <= 5)
+                        s.OfPostDelta5 += alignedDelta;
                 }
 
                 var slHit = s.Long ? candle.Low <= s.Sl : candle.High >= s.Sl;
@@ -450,6 +474,9 @@ namespace IctSmc
                 s.PartialR = s.PartialTaken ? 1m + 0.5m * closeR : rMultiple;
             }
 
+            if (s.OfCaptured && s.OfDeltaAvailable)
+                s.OfCvdDrift = (s.Long ? 1m : -1m) * (_cvd - s.OfCvdAtEntry);
+
             _openSignals.Remove(s);
             _resolvedSignals.Add(s);
 
@@ -475,7 +502,13 @@ namespace IctSmc
                 s.Tier,
                 s.ArmSource,
                 Csv(s.TriggerTag),
-                Csv(s.Layer));
+                Csv(s.Layer),
+                s.OfCaptured && s.OfDeltaAvailable ? Num(s.OfPostDelta5) : "",
+                s.OfCaptured && s.OfDeltaAvailable && s.OfTrackedBars > 0
+                    ? (s.OfAlignedBars * 100m / s.OfTrackedBars).ToString("0", CultureInfo.InvariantCulture)
+                    : "",
+                s.OfCaptured && s.OfDeltaAvailable ? Num(s.OfCvdDrift) : "",
+                s.OfCaptured ? (s.OfAbsorptionAtEntry ? "Yes" : "No") : "");
 
             JournalWrite("outcomes.csv", OutcomesHeader, line);
             WriteAnalytics();
@@ -505,6 +538,16 @@ namespace IctSmc
             AppendGroup(sb, "Direction", s => s.Long ? "Long" : "Short");
             AppendGroup(sb, "Family+ArmSource", s => $"{s.ZoneFamily}/{s.ArmSource}");
             AppendGroup(sb, "Family+Layer", s => $"{s.ZoneFamily}/{s.Layer}");
+            AppendGroup(sb, "OF_Absorption", s => !s.OfCaptured ? "n/a" : s.OfAbsorptionAtEntry ? "Yes" : "No");
+            AppendGroup(sb, "OF_EntryDelta", s =>
+            {
+                if (!s.OfCaptured || !s.OfDeltaAvailable)
+                    return "n/a";
+                var aligned = s.Long ? s.OfDeltaShare : -s.OfDeltaShare;
+                return aligned >= AbsorptionMinDeltaShare ? "Aligned"
+                    : aligned <= -AbsorptionMinDeltaShare ? "Opposed"
+                    : "Neutral";
+            });
             AppendGroup(sb, "ALL", _ => "ALL");
 
             var path = Path.Combine(JournalDir, $"{_sessionStamp}-analytics.csv");

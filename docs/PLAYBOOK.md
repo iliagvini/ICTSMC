@@ -459,6 +459,58 @@ point in the entry model writes an event with exact metrics:
 Every `ZoneTouch` is therefore classifiable post-hoc: fired / PD-vetoed /
 model-not-armed / model-expired — with the numbers to prove which.
 
+**Order-flow lens (observational).** ATAS's native bid/ask data adds an
+institutional layer to the audit: aggression (delta), effort vs result, and the
+footprint inside each candle. It never gates, delays, or modifies signal
+execution — it exists so the analytics can prove (or disprove) an order-flow edge
+before it earns any influence. Toggle: `OrderFlowEnabled` (default on).
+
+*Absorption detection* — an `Absorption` event is journaled when ALL of these hold
+on a completed bar (defaults in parentheses):
+
+1. **Effort** — volume ≥ `AbsorptionVolumeFactor` (1.5×) the average of the last
+   `OfVolumeLookback` (50) bars;
+2. **Aggression against the close** — |delta| ≥ `AbsorptionMinDeltaShare` (25%) of
+   the bar's volume, with the close on the opposite side: heavy selling but close
+   in the upper half = **bullish absorption** (passive buyers ate the selling);
+   mirror for bearish;
+3. **Result failure** — range ≤ `AbsorptionMaxRangeAtr` (0.6×) ATR, or the close
+   pinned in the outer 40% of the bar against the aggression;
+4. **Location** — the bar overlaps an active zone or sits within
+   `EqualLevelTicks` of an unswept liquidity level (elsewhere it's noise).
+
+The event's Extra column records every number: volume (and ×avg), delta (and % of
+volume), min/max delta, range/ATR, close position, footprint POC position, stacked
+imbalance count, and the zone/level it happened at. When the feed provides
+footprint data, POC pinned at the extreme against the move and stacked diagonal
+imbalances (`OfImbalanceRatio` 3:1 across `OfStackedImbalances` 3 levels) are
+recorded as supporting evidence — never required. An optional 🧲 alert
+(`AlertOnAbsorption`, default off) can announce live absorption at a level.
+
+*Signal snapshot* — signals.csv captures the order flow at the exact tick each
+signal fires: `Vol`, `RelVol` (×average), `DeltaAtFire`, `DeltaPct`, `CVD`
+(session cumulative delta), `CvdSlope5` (CVD change over the last 5 bars),
+`PocPct` (POC position in the firing bar), `Imbalances` (stacked, `nB/nS`), and
+`Absorption` (same-direction absorption stamped on a matched zone within the last
+10 bars, e.g. `Bull 3 bars ago @ 4H FVG`).
+
+*Post-entry evolution* — outcomes.csv adds `OF_Delta5` (net delta over the first
+5 bars after entry, signed toward the trade: positive = flow agreed),
+`OF_AlignedPct` (% of bars whose delta agreed while the signal was open),
+`OF_CvdDrift` (CVD change entry→resolution, signed toward the trade), and
+`OF_AbsorptionAtEntry` (Yes/No).
+
+*Analytics* — two groupings sit alongside the zone/tier tables: `OF_Absorption`
+(entries with vs without absorption confluence) and `OF_EntryDelta`
+(Aligned / Opposed / Neutral delta at the firing tick) — each with the full
+AvgR / AvgBE1R_R / AvgPartial2R_R comparison. If absorption-confluent entries
+outperform over a few weeks, the case for promoting order flow from observer to
+filter will be in the numbers.
+
+Feeds without bid/ask splits are detected automatically (a one-time
+`OrderFlowInfo` event says so); delta-based columns then stay blank rather than
+logging fake zeros, and volume-based metrics keep working.
+
 ## 13. Honest limitations
 
 - Swings confirm with a `SwingPeriod` lag; structure events therefore lag pivots. This

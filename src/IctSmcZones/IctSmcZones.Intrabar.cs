@@ -442,7 +442,7 @@ namespace IctSmc
 
             var dir = longSide ? "LONG" : "SHORT";
 
-            JournalSignal(new SignalRecord
+            var record = new SignalRecord
             {
                 Id = ++_nextSignalId,
                 Time = BarTime(bar),
@@ -463,7 +463,10 @@ namespace IctSmc
                 PdStatus = pdStatus,
                 Confluence = confluence,
                 SignalBar = bar
-            });
+            };
+
+            CaptureOrderFlowSnapshot(record, matches, bar);
+            JournalSignal(record);
 
             if (!AlertOnEntry)
                 return;

@@ -87,6 +87,10 @@ namespace IctSmc
         public bool TouchLogged;
         /// <summary>Latch: PD-filter rejection already journaled for this zone.</summary>
         public bool PdRejectLogged;
+        /// <summary>Bar of the most recent absorption event detected at this zone (-1 = none).</summary>
+        public int LastAbsorptionBar = -1;
+        /// <summary>Direction of that absorption (true = bullish, selling absorbed).</summary>
+        public bool LastAbsorptionBull;
 
         public bool IsBullish => Type is ZoneType.BullOrderBlock or ZoneType.BullFvg or ZoneType.BullIfvg;
         public bool IsOrderBlock => Type is ZoneType.BullOrderBlock or ZoneType.BearOrderBlock;
@@ -191,6 +195,28 @@ namespace IctSmc
         public bool PartialTaken;
         public bool PartialDone;
         public decimal PartialR;
+
+        // Order-flow snapshot at the firing tick (observational; blank columns when
+        // not captured or the feed lacks bid/ask delta).
+        public bool OfCaptured;
+        public bool OfDeltaAvailable = true;
+        public decimal OfVolume;
+        public decimal OfRelVolume;
+        public decimal OfDelta;
+        public decimal OfDeltaShare;
+        public decimal OfCvd;
+        public decimal OfCvdSlope5;
+        public decimal OfPocPct = -1m;
+        public string OfImbalances = "";
+        public string OfAbsorption = "";
+        public bool OfAbsorptionAtEntry;
+
+        // Order-flow evolution after entry.
+        public decimal OfPostDelta5;
+        public int OfAlignedBars;
+        public int OfTrackedBars;
+        public decimal OfCvdAtEntry;
+        public decimal OfCvdDrift;
 
         public decimal Risk => System.Math.Abs(Entry - Sl);
 

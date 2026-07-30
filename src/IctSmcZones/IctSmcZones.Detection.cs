@@ -17,6 +17,7 @@ namespace IctSmc
                 return;
 
             UpdateAtr(bar);
+            UpdateOrderFlow(bar);
             ConfirmSwings(bar);
             DetectStructureBreak(bar);
             UpdateLegExtreme(bar);
