@@ -417,6 +417,32 @@ resolution, R-multiple, MAE/MFE in R, bars held), and analytics (win-rate and
 expectancy grouped by zone family, layer, arm source, tier, direction). Historical
 rows are flagged HIST and act as a backtest of the identical live code path.
 
+**Shadow trade management.** Alongside the raw fixed-stop outcome, every signal is
+also resolved under two virtual management styles — never traded, only logged — so
+the journal accumulates a three-way comparison (`RMultiple` vs `BE1R_R` vs
+`Partial2R_R` in outcomes; `AvgR` vs `AvgBE1R_R` vs `AvgPartial2R_R` in analytics).
+Both simulations run bar-by-bar on completed bars with the same conservative rule
+as the raw engine: if a bar touches both the (virtual) stop and a target, the stop
+counts first — including the very bar a trigger level is reached. Exact rules:
+
+- **BE-at-+1R** — the moment a bar's range reaches `entry + 1R` (mirrored for
+  shorts), the virtual stop jumps to entry. From that bar on (inclusive): a return
+  to entry exits at **0R**; TP3 = **+3R**; TP2 reached latches and resolves **+2R**
+  at timeout; timeout without TP2 = close-based R. If price is stopped before ever
+  reaching +1R, the shadow result is the raw **−1R**; if +1R is never reached at
+  all, it simply equals the raw outcome.
+- **Partial-at-+2R** — when a bar's range reaches `entry + 2R`, half the position
+  is banked (0.5 × 2R = **+1R locked**) and the remaining half runs toward TP3 with
+  its stop moved to entry. Remainder outcomes: return to entry → total **+1R**;
+  TP3 → +1R + 0.5 × 3R = **+2.5R**; timeout → +1R + 0.5 × close-based R. Stopped
+  before +2R is ever reached → raw **−1R**; +2R never reached → equals the raw
+  outcome.
+
+This is the data that answers, over weeks of live signals, whether the MFE giveback
+seen in early sessions (winners retracing to the fixed stop after being +1R/+2R in
+profit) makes breakeven or partial management strictly better than the raw plan —
+per zone family, layer, arm source and tier, not as an anecdote.
+
 **Decision log.** Non-fires are logged as explicitly as fires — every suppression
 point in the entry model writes an event with exact metrics:
 

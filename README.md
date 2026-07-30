@@ -101,10 +101,15 @@ no duplicate rows):
 - `*-signals.csv` — every entry signal with tier, arm source (Sweep / TrapArm /
   Sweep+Trap), trigger zone, entry/SL/TP2/TP3, PD status, confluence stack
 - `*-outcomes.csv` — resolution per signal (SL / TP2 / TP3 / Timeout, conservative
-  SL-first on ambiguous bars), R-multiple, **MAE/MFE in R**, bars held
+  SL-first on ambiguous bars), R-multiple, **MAE/MFE in R**, bars held, plus two
+  **shadow trade-management results** simulated in parallel for every signal
+  (columns `BE1R_R` / `Partial2R_R`): what the trade would have made with the stop
+  moved to breakeven at +1R, and with half banked at +2R (stop to entry on the rest,
+  runner to TP3)
 - `*-analytics.csv` — win-rate & expectancy grouped by zone family (OB/FVG/iFVG),
   layer (LTF/4H/D…), arm source, tier, direction — answers "does TrapArm beat Sweep?"
-  and "which zones hit best?" directly
+  and "which zones hit best?" directly; `AvgBE1R_R` / `AvgPartial2R_R` sit next to
+  `AvgR` in every row so the three management styles are directly comparable per group
 
 Rows are flagged `LIVE` or `HIST` — historical rows are a built-in backtest of the
 exact same code path the live signals use.

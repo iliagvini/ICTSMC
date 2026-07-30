@@ -18,7 +18,9 @@ namespace IctSmc
     ///                    liquidity sweeps, BoS/MSS, failed MSS
     ///  • signals.csv   — every entry-model signal with its full trade plan
     ///  • outcomes.csv  — resolution of each signal: SL / TP2 / TP3 / Timeout,
-    ///                    R-multiple, MAE/MFE in R, bars held
+    ///                    R-multiple, MAE/MFE in R, bars held, plus two shadow
+    ///                    trade-management results simulated in parallel (never
+    ///                    traded): BE-at-+1R and partial-at-+2R
     ///  • analytics.csv — aggregated win-rate / expectancy per zone family,
     ///                    layer (LTF/4H/D…), arm source (Sweep vs TrapArm) and tier
     ///
@@ -71,7 +73,7 @@ namespace IctSmc
         private const string SignalsHeader =
             "SignalId,Time,Mode,Instrument,Direction,Tier,ArmSource,TriggerTag,Layer,ZoneTop,ZoneBottom,Entry,SL,TP2,TP3,PdStatus,Confluence";
         private const string OutcomesHeader =
-            "SignalId,ResolvedTime,Mode,Outcome,ExitPrice,RMultiple,MAE_R,MFE_R,BarsHeld,Direction,Tier,ArmSource,TriggerTag,Layer";
+            "SignalId,ResolvedTime,Mode,Outcome,ExitPrice,RMultiple,BE1R_R,Partial2R_R,MAE_R,MFE_R,BarsHeld,Direction,Tier,ArmSource,TriggerTag,Layer";
 
         #endregion
 
@@ -299,6 +301,8 @@ namespace IctSmc
                 var tp3Hit = s.Long ? candle.High >= s.Tp3 : candle.Low <= s.Tp3;
                 var tp2Hit = s.Long ? candle.High >= s.Tp2 : candle.Low <= s.Tp2;
 
+                UpdateShadowManagement(s, candle.High, candle.Low, slHit, tp2Hit, tp3Hit);
+
                 if (slHit)
                 {
                     Resolve(s, bar, "SL", s.Sl, -1m);
@@ -330,6 +334,95 @@ namespace IctSmc
             }
         }
 
+        /// <summary>
+        /// Bar-by-bar simulation of the two virtual management styles, run BEFORE the
+        /// raw resolution checks each bar. Same conservative rule as the raw engine:
+        /// whenever a bar touches both the (virtual) stop and a target, the stop is
+        /// assumed to have been hit first — including the very bar a trigger level is
+        /// reached. Exact definitions:
+        ///  • BE-at-+1R  — once the bar range reaches entry + 1R (long; mirrored for
+        ///    shorts) the virtual stop moves to entry. From that bar on (inclusive),
+        ///    a return to entry exits at 0R; otherwise TP3 = +3R, TP2 latch resolves
+        ///    +2R at timeout, timeout without TP2 = close-based R. If +1R is never
+        ///    reached the shadow result equals the raw outcome.
+        ///  • Partial-at-+2R — when the bar range reaches entry + 2R, half the
+        ///    position is banked (0.5 × 2R = +1R locked) and the remaining half runs
+        ///    with its stop at entry. Remainder: return to entry → total +1R;
+        ///    TP3 → +1R + 0.5 × 3R = +2.5R; timeout → +1R + 0.5 × close-based R.
+        ///    If +2R is never reached the shadow result equals the raw outcome.
+        /// </summary>
+        private static void UpdateShadowManagement(SignalRecord s, decimal high, decimal low, bool slHit, bool tp2Hit, bool tp3Hit)
+        {
+            var risk = s.Risk;
+            if (risk <= 0)
+                return; // degenerate; Resolve() falls back to the raw R for both shadows
+
+            var be1Hit = s.Long ? high >= s.Entry + risk : low <= s.Entry - risk;
+            var backToEntry = s.Long ? low <= s.Entry : high >= s.Entry;
+
+            // ---- BE-at-+1R shadow ----
+            if (!s.BeDone)
+            {
+                if (!s.BeArmed && slHit)
+                {
+                    s.BeDone = true;
+                    s.BeR = -1m; // stop-first: raw SL before the +1R trigger
+                }
+                else
+                {
+                    if (!s.BeArmed && be1Hit)
+                        s.BeArmed = true;
+
+                    if (s.BeArmed)
+                    {
+                        if (backToEntry)
+                        {
+                            s.BeDone = true;
+                            s.BeR = 0m; // virtual stop at entry hit
+                        }
+                        else if (tp3Hit)
+                        {
+                            s.BeDone = true;
+                            s.BeR = 3m;
+                        }
+                        else if (tp2Hit)
+                        {
+                            s.BeTp2 = true; // resolves +2R at timeout, like the raw engine
+                        }
+                    }
+                }
+            }
+
+            // ---- Partial-at-+2R shadow ----
+            if (!s.PartialDone)
+            {
+                if (!s.PartialTaken && slHit)
+                {
+                    s.PartialDone = true;
+                    s.PartialR = -1m; // stop-first: full position stopped before +2R
+                }
+                else
+                {
+                    if (!s.PartialTaken && tp2Hit)
+                        s.PartialTaken = true; // +1R banked, remainder stop at entry
+
+                    if (s.PartialTaken)
+                    {
+                        if (backToEntry)
+                        {
+                            s.PartialDone = true;
+                            s.PartialR = 1m; // banked half only; remainder out at entry
+                        }
+                        else if (tp3Hit)
+                        {
+                            s.PartialDone = true;
+                            s.PartialR = 2.5m; // +1R banked + 0.5 × 3R runner
+                        }
+                    }
+                }
+            }
+        }
+
         private void Resolve(SignalRecord s, int bar, string outcome, decimal exit, decimal rMultiple)
         {
             s.Resolved = true;
@@ -337,13 +430,32 @@ namespace IctSmc
             s.Exit = exit;
             s.ResolvedBar = bar;
 
+            var risk = s.Risk;
+
+            // Finalize shadows still open at raw resolution (timeout / TP2-latch paths;
+            // SL and TP3 shadows always close bar-by-bar before this point). A shadow
+            // whose trigger never fired simply mirrors the raw outcome.
+            var close = GetCandle(bar).Close;
+            var closeR = risk > 0 ? (s.Long ? close - s.Entry : s.Entry - close) / risk : 0m;
+
+            if (!s.BeDone)
+            {
+                s.BeDone = true;
+                s.BeR = s.BeTp2 ? 2m : s.BeArmed ? closeR : rMultiple;
+            }
+
+            if (!s.PartialDone)
+            {
+                s.PartialDone = true;
+                s.PartialR = s.PartialTaken ? 1m + 0.5m * closeR : rMultiple;
+            }
+
             _openSignals.Remove(s);
             _resolvedSignals.Add(s);
 
             if (!JournalEnabled)
                 return;
 
-            var risk = s.Risk;
             var maeR = risk > 0 ? s.Mae / risk : 0m;
             var mfeR = risk > 0 ? s.Mfe / risk : 0m;
 
@@ -354,6 +466,8 @@ namespace IctSmc
                 outcome,
                 Num(exit),
                 Num(rMultiple),
+                Num(s.BeR),
+                Num(s.PartialR),
                 Num(maeR),
                 Num(mfeR),
                 (bar - s.SignalBar).ToString(CultureInfo.InvariantCulture),
@@ -382,7 +496,7 @@ namespace IctSmc
                 return;
 
             var sb = new StringBuilder();
-            sb.AppendLine("GroupBy,Key,Signals,Wins,Losses,Timeouts,WinRatePct,AvgR,AvgMAE_R,AvgMFE_R");
+            sb.AppendLine("GroupBy,Key,Signals,Wins,Losses,Timeouts,WinRatePct,AvgR,AvgBE1R_R,AvgPartial2R_R,AvgMAE_R,AvgMFE_R");
 
             AppendGroup(sb, "ZoneFamily", s => s.ZoneFamily);
             AppendGroup(sb, "Layer", s => s.Layer);
@@ -422,6 +536,8 @@ namespace IctSmc
                     _ => s.Risk > 0 ? (s.Long ? s.Exit - s.Entry : s.Entry - s.Exit) / s.Risk : 0m
                 });
 
+                var avgBe = group.Average(s => s.BeR);
+                var avgPartial = group.Average(s => s.PartialR);
                 var avgMae = group.Average(s => s.Risk > 0 ? s.Mae / s.Risk : 0m);
                 var avgMfe = group.Average(s => s.Risk > 0 ? s.Mfe / s.Risk : 0m);
 
@@ -434,6 +550,8 @@ namespace IctSmc
                     timeouts.ToString(CultureInfo.InvariantCulture),
                     winRate.ToString("0.#", CultureInfo.InvariantCulture),
                     avgR.ToString("0.##", CultureInfo.InvariantCulture),
+                    avgBe.ToString("0.##", CultureInfo.InvariantCulture),
+                    avgPartial.ToString("0.##", CultureInfo.InvariantCulture),
                     avgMae.ToString("0.##", CultureInfo.InvariantCulture),
                     avgMfe.ToString("0.##", CultureInfo.InvariantCulture)));
             }

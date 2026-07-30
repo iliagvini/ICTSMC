@@ -179,6 +179,19 @@ namespace IctSmc
         public decimal Exit;
         public int ResolvedBar;
 
+        // Shadow trade-management simulation (virtual — never traded, only logged).
+        // BE-at-+1R shadow: once price moves +1R in favor, the virtual stop jumps
+        // to entry; the same bar-by-bar rules then resolve the shadow position.
+        public bool BeArmed;
+        public bool BeTp2;
+        public bool BeDone;
+        public decimal BeR;
+        // Partial-at-+2R shadow: at +2R half the position is banked (+1R locked)
+        // and the remaining half runs to TP3 with its stop at entry.
+        public bool PartialTaken;
+        public bool PartialDone;
+        public decimal PartialR;
+
         public decimal Risk => System.Math.Abs(Entry - Sl);
 
         public string ZoneFamily => TriggerType switch
