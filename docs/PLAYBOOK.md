@@ -353,7 +353,15 @@ the same zone.
 - **De-duplicated** — one touch alert per zone lifetime, one sweep alert per level, one
   entry per cycle.
 - Delivery: ATAS popup + **Telegram** (background fire-and-forget HTTP; a network stall
-  can never freeze the chart thread).
+  can never freeze the chart thread). Telegram messages are signed with the chart
+  identity — instrument + measured timeframe (`💹 GC 1H`) — so multiple charts and
+  bots stay unambiguous.
+- **Remote /shot command** — the bot also listens (one long-poll loop per bot token,
+  process-wide hub shared by all charts): send `/shot`, get an inline-button list of
+  the charts wired to that bot/chat, tap one, and receive a freshly self-rendered
+  PNG of that chart (candles + zones + liquidity + EQ + structure in the indicator's
+  own style). Rendered from data, not screen-captured — works with ATAS minimized.
+  Unknown chat ids are ignored. Toggle: *Remote commands (/shot snapshots)*.
 
 ---
 

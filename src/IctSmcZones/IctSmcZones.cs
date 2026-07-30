@@ -54,6 +54,7 @@ namespace IctSmc
         private readonly List<long> _barDeltaSamples = new();
         private bool _htfConfigured;
         private string _htfInfo = "";
+        private string _chartTfLabel = "";
 
         private SwingPoint _lastSwingHigh;
         private SwingPoint _lastSwingLow;
@@ -382,7 +383,19 @@ namespace IctSmc
         public bool TelegramEnabled { get; set; } = true;
 
         [Display(GroupName = GrpTelegram, Name = "Bot token", Order = 1010)]
-        public string TelegramBotToken { get; set; } = "8903920388:AAHUoNC0pC9ImjZXmE_nlalUlp9vu8ayUjM";
+        public string TelegramBotToken
+        {
+            get => _telegramBotToken;
+            set
+            {
+                _telegramBotToken = value;
+                // A token change must reach the command hub without waiting for a
+                // chart reload, so the right poller starts listening immediately.
+                TelegramHub.Register(this);
+            }
+        }
+
+        private string _telegramBotToken = "8903920388:AAHUoNC0pC9ImjZXmE_nlalUlp9vu8ayUjM";
 
         [Display(GroupName = GrpTelegram, Name = "Chat id", Order = 1020)]
         public string TelegramChatId { get; set; } = "-5306304855";
@@ -442,6 +455,7 @@ namespace IctSmc
             _barDeltaSamples.Clear();
             _htfConfigured = false;
             _htfInfo = "";
+            _chartTfLabel = "";
             _lastSwingHigh = null;
             _lastSwingLow = null;
             _trend = 0;

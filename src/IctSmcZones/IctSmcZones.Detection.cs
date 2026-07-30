@@ -687,6 +687,11 @@ namespace IctSmc
             _htfInfo = HtfMode == HtfSelectionMode.Manual
                 ? $"HTF manual: {layerText} · chart {chartText}"
                 : $"HTF auto: {layerText} · chart {chartText}";
+
+            // The measured chart TF doubles as the alert identity ("GC 1H") and
+            // registers this chart with the Telegram command hub (/shot).
+            _chartTfLabel = MinutesToLabel(chartMinutes);
+            TelegramHub.Register(this);
         }
 
         /// <summary>

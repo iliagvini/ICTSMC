@@ -42,7 +42,25 @@ per zone/level/event:
 3. In the indicator settings → *10. Telegram*: enable, paste token + chat id.
 
 Messages are sent fire-and-forget on a background thread — network issues can never
-freeze the chart.
+freeze the chart. Every message is signed with the chart identity — instrument **and
+timeframe** (`💹 GC 1H`, `💹 NQ 15m`) — so multi-chart setups stay unambiguous.
+Different charts can use different bots/chats (e.g. Gold → group, NQ → private bot):
+save per-chart settings as ATAS templates.
+
+### Remote commands: /shot snapshots
+
+With *Remote commands (/shot snapshots)* enabled (default), the bot also **listens**:
+
+- Send **/shot** (or /charts) to the bot → it replies with a button list of every
+  chart wired to that bot + chat (`📸 GC 1H`, `📸 NQ 15m`).
+- Tap a button → a **fresh chart image renders on the spot** and arrives as a photo:
+  last ~120 candles plus all active zones, liquidity lines, EQ and structure markers,
+  in the indicator's visual style.
+
+The image is drawn from live data, not screen-captured — it works with ATAS minimized
+or the chart in a background tab. Commands from unknown chat ids are ignored. One
+long-poll loop runs per bot token, shared by all charts in the ATAS instance (don't
+run two ATAS terminals polling the same bot — Telegram allows one listener per token).
 
 ## Build & install
 
@@ -136,6 +154,9 @@ src/IctSmcZones/
   IctSmcZones.Detection.cs      bar-close engine: swings, BoS/MSS, FVG, OB, HTF
   IctSmcZones.Intrabar.cs       tick engine: touches, sweeps, entry model, alerts, Telegram
   IctSmcZones.Rendering.cs      custom drawing: zones, liquidity, structure, premium/discount
+  IctSmcZones.OrderFlow.cs      observational order-flow lens: absorption, CVD, footprint
+  IctSmcZones.Journal.cs        audit pipeline: events, signals, outcomes, analytics CSVs
+  IctSmcZones.TelegramRemote.cs /shot command hub + self-rendered chart snapshots
 docs/STRATEGY.md                how each book concept maps to code
 ```
 

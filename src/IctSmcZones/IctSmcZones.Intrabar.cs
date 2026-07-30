@@ -565,7 +565,13 @@ namespace IctSmc
             }
 
             if (TelegramEnabled)
-                SendTelegram(instrument, message);
+            {
+                // Telegram identity includes the chart timeframe: "GC 1H", "NQ 15m".
+                var identity = string.IsNullOrEmpty(_chartTfLabel) || string.IsNullOrEmpty(instrument)
+                    ? instrument
+                    : $"{instrument} {_chartTfLabel}";
+                SendTelegram(identity, message);
+            }
         }
 
         private static string EscapeHtml(string text) =>
