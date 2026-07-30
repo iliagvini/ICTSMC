@@ -85,7 +85,10 @@ namespace IctSmc
                     continue;
 
                 if (zone.State == ZoneState.Active)
+                {
                     zone.State = ZoneState.Touched;
+                    TryEmitContinuationSignal(zone, bar);
+                }
 
                 if (!zone.TouchLogged)
                 {
@@ -479,6 +482,109 @@ namespace IctSmc
                  $"🛑 Stop: {FormatPrice(sl)}\n" +
                  $"🎯 Targets: 2R {FormatPrice(tp2)} · 3R {FormatPrice(tp3)}\n" +
                  "✅ Confirm first: rejection wick / lower-TF MSS");
+        }
+
+        /// <summary>
+        /// C-tier "Non-ICT concept" continuation signal: fires on the FIRST touch
+        /// of a fresh, trend-aligned zone that the core sweep→MSS→discount model
+        /// would NOT trade — either because no setup is armed, or because the zone
+        /// sits beyond the PD limit (premium/discount continuation). Deliberately
+        /// the lowest tier: it exists so the journal measures the momentum-
+        /// continuation play with real outcomes instead of excluding it untracked.
+        /// A++/A+/B logic is untouched; when the armed model can fire from this
+        /// zone, C stays silent (no double signal).
+        /// </summary>
+        private void TryEmitContinuationSignal(Zone zone, int bar)
+        {
+            if (!EntryModelEnabled || !ContinuationSignalsEnabled || zone.ContinuationFired)
+                return;
+
+            var longSide = zone.IsBullish;
+
+            // Continuation only: trade strictly with the tracked structure trend.
+            if (_trend != (longSide ? 1 : -1))
+                return;
+
+            // Fresh zones only — the concept is a newly minted imbalance in a move.
+            if (bar - zone.StartBar > ContinuationMaxAgeBars)
+                return;
+
+            var range = GetDealingRange();
+            decimal? eq = null;
+            var tolerance = 0m;
+            if (range.HasValue)
+            {
+                eq = (range.Value.High.Price + range.Value.Low.Price) / 2m;
+                tolerance = (range.Value.High.Price - range.Value.Low.Price) * PdTolerancePercent / 100m;
+            }
+
+            var pdOk = !EntryNeedsPdAlignment || eq == null ||
+                       (longSide ? zone.Mid <= eq.Value + tolerance : zone.Mid >= eq.Value - tolerance);
+            var armed = longSide ? _armedBullUntil >= bar : _armedBearUntil >= bar;
+
+            // The core model owns this touch — it can (or just did) fire an A/B signal.
+            if (armed && pdOk)
+                return;
+
+            zone.ContinuationFired = true;
+
+            var reason = armed
+                ? $"PD override: zone mid {FormatPrice(zone.Mid)} beyond EQ limit"
+                : "no sweep→MSS chain";
+
+            var buffer = SlBufferTicks * TickSize;
+            var entry = longSide ? zone.Top : zone.Bottom;
+            var sl = longSide ? zone.Bottom - buffer : zone.Top + buffer;
+            var risk = Math.Abs(entry - sl);
+            var tp2 = longSide ? entry + risk * 2 : entry - risk * 2;
+            var tp3 = longSide ? entry + risk * 3 : entry - risk * 3;
+
+            var pdStatus = "n/a";
+            if (eq.HasValue)
+            {
+                pdStatus = zone.Mid < eq.Value - tolerance ? "Discount"
+                    : zone.Mid <= eq.Value + tolerance ? "Near EQ"
+                    : "Premium";
+            }
+
+            var record = new SignalRecord
+            {
+                Id = ++_nextSignalId,
+                Time = BarTime(bar),
+                Live = _realtime,
+                Long = longSide,
+                Tier = "C",
+                ArmSource = "Continuation",
+                TriggerTag = zone.Tag,
+                TriggerType = zone.Type,
+                TriggerHtf = zone.IsHtf,
+                Layer = zone.IsHtf ? zone.HtfLabel : "LTF",
+                ZoneTop = zone.Top,
+                ZoneBottom = zone.Bottom,
+                Entry = entry,
+                Sl = sl,
+                Tp2 = tp2,
+                Tp3 = tp3,
+                PdStatus = pdStatus,
+                Confluence = $"Non-ICT concept · momentum continuation · {reason}",
+                SignalBar = bar
+            };
+
+            CaptureOrderFlowSnapshot(record, new List<Zone> { zone }, bar);
+            JournalSignal(record);
+
+            if (!AlertOnEntry)
+                return;
+
+            var counterPd = pdStatus == (longSide ? "Premium" : "Discount");
+            Fire($"🟡 C-TIER {(longSide ? "LONG" : "SHORT")} — Continuation (Non-ICT)\n" +
+                 $"📍 Zone: {zone.Tag} {FormatPrice(zone.Bottom)}–{FormatPrice(zone.Top)} (fresh, {bar - zone.StartBar} bars old)\n" +
+                 $"⚖️ Range position: {pdStatus}{(counterPd ? " — counter-PD" : "")}\n" +
+                 $"ℹ️ Outside core model: {reason}\n" +
+                 $"▶️ Entry: ~{FormatPrice(entry)}\n" +
+                 $"🛑 Stop: {FormatPrice(sl)}\n" +
+                 $"🎯 Targets: 2R {FormatPrice(tp2)} · 3R {FormatPrice(tp3)}\n" +
+                 "✅ Lowest tier — demand strong LTF confirmation");
         }
 
         /// <summary>

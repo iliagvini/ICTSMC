@@ -336,6 +336,29 @@ The 🟢/🔴 alert ships a complete trade plan (tier marks repeated by confluen
 Firing consumes the armed state — one signal per sweep→MSS cycle, no machine-gunning
 the same zone.
 
+**C-tier: continuation signals (Non-ICT concept).** The core model is a
+reversal-retracement machine — it will never buy a fresh premium FVG mid-rally, and
+that discipline is correct per the book. But those momentum-continuation touches
+exist and some of them work, so instead of excluding them untracked, they fire as an
+explicitly demoted tier (🟡 **C**, `ArmSource=Continuation`). A C-tier signal fires
+on the **first touch** of a zone when ALL of these hold (toggle
+`ContinuationSignalsEnabled`, default on):
+
+1. **trend-aligned** — bullish zone with bullish tracked structure (mirror for
+   shorts); never counter-trend;
+2. **fresh** — the zone is at most `ContinuationMaxAgeBars` (20) bars old;
+3. **outside the core model** — that side is unarmed (no sweep→MSS chain) *or*
+   armed but the zone fails the PD limit (the premium-continuation case). If the
+   armed model can fire from the zone, C stays silent — never a double signal;
+4. **once per zone**.
+
+The alert and journal row state the exact exclusion reason (`no sweep→MSS chain` /
+`PD override`), and the plan math (entry/SL/TP2/TP3) is identical to A/B signals.
+C rows flow through the full pipeline — outcomes, BE/partial shadow management,
+order-flow snapshot, and the Tier/ArmSource analytics — so after a few weeks the
+data will say exactly what the continuation play earns versus the core model.
+A++/A+/B behavior is completely unchanged.
+
 ---
 
 ## 9. Layer 8 — Alerts & delivery

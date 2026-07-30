@@ -87,6 +87,8 @@ namespace IctSmc
         public bool TouchLogged;
         /// <summary>Latch: PD-filter rejection already journaled for this zone.</summary>
         public bool PdRejectLogged;
+        /// <summary>Latch: a C-tier continuation signal already fired from this zone.</summary>
+        public bool ContinuationFired;
         /// <summary>Bar of the most recent absorption event detected at this zone (-1 = none).</summary>
         public int LastAbsorptionBar = -1;
         /// <summary>Direction of that absorption (true = bullish, selling absorbed).</summary>

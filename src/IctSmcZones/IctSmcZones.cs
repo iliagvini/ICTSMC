@@ -347,6 +347,13 @@ namespace IctSmc
         [Range(0, 100)]
         public int SlBufferTicks { get; set; } = 4;
 
+        [Display(GroupName = GrpSignal, Name = "C-tier continuation signals (Non-ICT)", Order = 860)]
+        public bool ContinuationSignalsEnabled { get; set; } = true;
+
+        [Display(GroupName = GrpSignal, Name = "Continuation: max zone age (bars)", Order = 862)]
+        [Range(1, 200)]
+        public int ContinuationMaxAgeBars { get; set; } = 20;
+
         #endregion
 
         #region Alert settings

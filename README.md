@@ -28,7 +28,9 @@ per zone/level/event:
 - 💧 **Liquidity taken** — BSL/SSL crossed, with the follow-up hint (watch for MSS)
 - 📐 **BoS / MSS** — structure events with direction
 - 🟢/🔴 **Entry model** — sweep + MSS + return to zone, tiered by confluence
-  (🟢🟢🟢 A++ with Daily/Weekly zone, 🟢🟢 A+ with any HTF zone, 🟢 B standalone),
+  (🟢🟢🟢 A++ with Daily/Weekly zone, 🟢🟢 A+ with any HTF zone, 🟢 B standalone;
+  🟡 **C** = trend-aligned fresh-zone *continuation* touch outside the core model —
+  explicitly labeled Non-ICT, lowest tier, tracked separately in analytics),
   with zone stack, PD status (Discount/Near EQ/Premium), entry, SL and 2R/3R targets
 - ⚠️ **Failed MSS** — an armed setup structurally invalidated by an opposite MSS
   (often the seed of the reverse trade)
