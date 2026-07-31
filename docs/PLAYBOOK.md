@@ -499,12 +499,13 @@ before it earns any influence. Toggle: `OrderFlowEnabled` (default on).
 *Absorption detection* — an `Absorption` event is journaled when ALL of these hold
 on a completed bar (defaults in parentheses):
 
-1. **Effort** — volume ≥ `AbsorptionVolumeFactor` (1.5×) the average of the last
+1. **Effort** — volume ≥ `AbsorptionVolumeFactor` (1.3×) the average of the last
    `OfVolumeLookback` (50) bars;
-2. **Aggression against the close** — |delta| ≥ `AbsorptionMinDeltaShare` (25%) of
+2. **Aggression against the close** — |delta| ≥ `AbsorptionMinDeltaShare` (10%) of
    the bar's volume, with the close on the opposite side: heavy selling but close
    in the upper half = **bullish absorption** (passive buyers ate the selling);
-   mirror for bearish;
+   mirror for bearish (defaults recalibrated after live GC data showed 15m bar
+   delta share rarely exceeds ~15%, so the original 25% never triggered);
 3. **Result failure** — range ≤ `AbsorptionMaxRangeAtr` (0.6×) ATR, or the close
    pinned in the outer 40% of the bar against the aggression;
 4. **Location** — the bar overlaps an active zone or sits within

@@ -44,15 +44,15 @@ namespace IctSmc
 
         [Display(GroupName = GrpOrderFlow, Name = "Absorption: min volume vs average (x)", Order = 1220)]
         [Range(1.0, 10.0)]
-        public decimal AbsorptionVolumeFactor { get; set; } = 1.5m;
+        public decimal AbsorptionVolumeFactor { get; set; } = 1.3m;
 
         [Display(GroupName = GrpOrderFlow, Name = "Absorption: max bar range vs ATR (x)", Order = 1230)]
         [Range(0.1, 3.0)]
         public decimal AbsorptionMaxRangeAtr { get; set; } = 0.6m;
 
         [Display(GroupName = GrpOrderFlow, Name = "Absorption: min |delta| share of volume", Order = 1240)]
-        [Range(0.05, 0.9)]
-        public decimal AbsorptionMinDeltaShare { get; set; } = 0.25m;
+        [Range(0.02, 0.9)]
+        public decimal AbsorptionMinDeltaShare { get; set; } = 0.10m;
 
         [Display(GroupName = GrpOrderFlow, Name = "Footprint: imbalance ratio (x)", Order = 1250)]
         [Range(1.5, 10.0)]

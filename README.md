@@ -111,7 +111,9 @@ Copy `src/IctSmcZones/bin/Release/IctSmcZones.dll` into
 
 With journaling on (default), every session writes CSVs to
 `Documents\ATAS\ICTSMC-Journal\<instrument>\` (new file set per recalculation —
-no duplicate rows):
+no duplicate rows). File names are `<yyyyMMdd-HHmmss>-<id>-*.csv`, where `<id>`
+is a short per-chart-instance suffix so two charts on the same instrument can
+never collide into one file even when they recalculate in the same second:
 
 - `*-events.csv` — zone created/touched/mitigated/inverted, sweeps, BoS/MSS, failed MSS,
   **plus the full decision log**: `Armed` (source, sweep age, window), `ArmRejected`

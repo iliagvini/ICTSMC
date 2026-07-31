@@ -66,6 +66,11 @@ namespace IctSmc
         private readonly List<SignalRecord> _resolvedSignals = new();
 
         private string _sessionStamp = "";
+        // Stable per-chart-instance suffix baked into the session stamp: two charts
+        // on the same instrument that recalculate in the same second would otherwise
+        // collide on identical yyyyMMdd-HHmmss filenames and interleave their rows
+        // (duplicate headers + colliding signal ids — observed in the field).
+        private string _journalInstanceId;
         private int _nextZoneId;
         private int _nextSignalId;
 
@@ -92,7 +97,9 @@ namespace IctSmc
 
             _openSignals.Clear();
             _resolvedSignals.Clear();
-            _sessionStamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+            _journalInstanceId ??= Guid.NewGuid().ToString("N")[..4];
+            _sessionStamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture)
+                            + "-" + _journalInstanceId;
             _nextZoneId = 0;
             _nextSignalId = 0;
         }
