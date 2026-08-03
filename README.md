@@ -145,8 +145,11 @@ never collide into one file even when they recalculate in the same second:
   and "which zones hit best?" directly; `AvgBE1R_R` / `AvgPartial2R_R` sit next to
   `AvgR` in every row so the three management styles are directly comparable per group
 
-Rows are flagged `LIVE` or `HIST` — historical rows are a built-in backtest of the
-exact same code path the live signals use.
+**LIVE rows only by default** (`Journal LIVE rows only`, on): the history replay is
+journal-silent, so files stay lean and every row is something that actually happened
+while the chart was live. Flip the toggle off for one session to regenerate the full
+`HIST` backfill — a deterministic backtest of the exact same code path the live
+signals use; nothing is ever lost because replay always rebuilds it from the candles.
 
 ## Repository layout
 

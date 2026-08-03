@@ -24,11 +24,12 @@ namespace IctSmc
     ///  • analytics.csv — aggregated win-rate / expectancy per zone family,
     ///                    layer (LTF/4H/D…), arm source (Sweep vs TrapArm) and tier
     ///
-    /// Files are per session (a new set on every full recalculation), so historical
-    /// backfill and live rows never duplicate. Rows carry a LIVE/HIST flag: HIST rows
-    /// come from replaying chart history — a built-in backtest of the exact same code
-    /// path the live signals use. All IO is buffered and flushed off the chart thread;
-    /// an IO failure can never touch trading logic.
+    /// Files are per session (a new set on every full recalculation). By default only
+    /// LIVE rows are written (JournalLiveOnly) — the history replay is journal-silent,
+    /// keeping files lean. Switching the toggle off regenerates the full HIST backfill
+    /// (a deterministic backtest of the exact same code path the live signals use) on
+    /// the next recalculation. All IO is buffered and flushed off the chart thread; an
+    /// IO failure can never touch trading logic.
     /// </summary>
     public partial class IctSmcZones
     {
@@ -41,6 +42,12 @@ namespace IctSmc
 
         [Display(GroupName = GrpJournal, Name = "Journal folder (empty = Documents\\ATAS\\ICTSMC-Journal)", Order = 1110)]
         public string JournalPath { get; set; } = "";
+
+        // LIVE-only keeps the files lean (a handful of rows per session instead of
+        // hundreds of replay rows). Switch off for a session to regenerate the full
+        // deterministic HIST backtest on demand — replay always rebuilds it.
+        [Display(GroupName = GrpJournal, Name = "Journal LIVE rows only (no historical backfill)", Order = 1115)]
+        public bool JournalLiveOnly { get; set; } = true;
 
         [Display(GroupName = GrpJournal, Name = "Signal timeout (bars)", Order = 1120)]
         [Range(10, 2000)]
@@ -131,6 +138,10 @@ namespace IctSmc
         private void JournalWrite(string file, string header, string line)
         {
             if (!JournalEnabled)
+                return;
+
+            // LIVE-only mode: backfill rows never even enqueue — zero replay IO.
+            if (JournalLiveOnly && !_realtime)
                 return;
 
             List<string> toFlush = null;
@@ -531,6 +542,11 @@ namespace IctSmc
             if (!JournalEnabled)
                 return;
 
+            // A backfill-fired signal can resolve during live ticks; its signal row
+            // was never journaled, so skip the outcome too — no orphan ids.
+            if (JournalLiveOnly && !s.Live)
+                return;
+
             var maeR = risk > 0 ? s.Mae / risk : 0m;
             var mfeR = risk > 0 ? s.Mfe / risk : 0m;
 
@@ -567,20 +583,29 @@ namespace IctSmc
         /// </summary>
         private void WriteAnalytics()
         {
-            if (!JournalEnabled || _resolvedSignals.Count == 0)
+            if (!JournalEnabled)
+                return;
+
+            // Analytics must mirror what outcomes.csv contains: in LIVE-only mode
+            // that means live-fired signals exclusively.
+            var pool = JournalLiveOnly
+                ? _resolvedSignals.Where(s => s.Live).ToList()
+                : _resolvedSignals;
+
+            if (pool.Count == 0)
                 return;
 
             var sb = new StringBuilder();
             sb.AppendLine("GroupBy,Key,Signals,Wins,Losses,Timeouts,WinRatePct,AvgR,AvgBE1R_R,AvgPartial2R_R,AvgMAE_R,AvgMFE_R");
 
-            AppendGroup(sb, "ZoneFamily", s => s.ZoneFamily);
-            AppendGroup(sb, "Layer", s => s.Layer);
-            AppendGroup(sb, "ArmSource", s => s.ArmSource);
-            AppendGroup(sb, "Tier", s => s.Tier);
-            AppendGroup(sb, "Direction", s => s.Long ? "Long" : "Short");
-            AppendGroup(sb, "Family+ArmSource", s => $"{s.ZoneFamily}/{s.ArmSource}");
-            AppendGroup(sb, "Family+Layer", s => $"{s.ZoneFamily}/{s.Layer}");
-            AppendGroup(sb, "ALL", _ => "ALL");
+            AppendGroup(sb, pool, "ZoneFamily", s => s.ZoneFamily);
+            AppendGroup(sb, pool, "Layer", s => s.Layer);
+            AppendGroup(sb, pool, "ArmSource", s => s.ArmSource);
+            AppendGroup(sb, pool, "Tier", s => s.Tier);
+            AppendGroup(sb, pool, "Direction", s => s.Long ? "Long" : "Short");
+            AppendGroup(sb, pool, "Family+ArmSource", s => $"{s.ZoneFamily}/{s.ArmSource}");
+            AppendGroup(sb, pool, "Family+Layer", s => $"{s.ZoneFamily}/{s.Layer}");
+            AppendGroup(sb, pool, "ALL", _ => "ALL");
 
             var path = Path.Combine(JournalDir, $"{_sessionStamp}-analytics.csv");
             var text = sb.ToString();
@@ -592,9 +617,9 @@ namespace IctSmc
             });
         }
 
-        private void AppendGroup(StringBuilder sb, string groupName, Func<SignalRecord, string> selector)
+        private void AppendGroup(StringBuilder sb, List<SignalRecord> pool, string groupName, Func<SignalRecord, string> selector)
         {
-            foreach (var group in _resolvedSignals.GroupBy(selector).OrderBy(g => g.Key))
+            foreach (var group in pool.GroupBy(selector).OrderBy(g => g.Key))
             {
                 var total = group.Count();
                 var wins = group.Count(s => s.Outcome is "TP2" or "TP3");

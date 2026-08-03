@@ -454,8 +454,12 @@ liquidity remain. `Detailed` mode disables culling for post-session review.
 events (zone lifecycle, sweeps, structure, failed MSS), signals (full trade plan +
 arm source + confluence), outcomes (SL/TP2/TP3/Timeout with conservative SL-first
 resolution, R-multiple, MAE/MFE in R, bars held), and analytics (win-rate and
-expectancy grouped by zone family, layer, arm source, tier, direction). Historical
-rows are flagged HIST and act as a backtest of the identical live code path.
+expectancy grouped by zone family, layer, arm source, tier, direction). By default
+only LIVE rows are written (`Journal LIVE rows only`, on) — files stay lean and
+every row is a real-time event. Turning the toggle off makes the next
+recalculation regenerate the full HIST backfill: a deterministic backtest of the
+identical live code path, available on demand because replay always rebuilds it
+from the candles.
 
 **Shadow trade management.** Alongside the raw fixed-stop outcome, every signal is
 also resolved under two virtual management styles — never traded, only logged — so
