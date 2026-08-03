@@ -355,8 +355,8 @@ on the **first touch** of a zone when ALL of these hold (toggle
 The alert and journal row state the exact exclusion reason (`no sweep→MSS chain` /
 `PD override`), and the plan math (entry/SL/TP2/TP3) is identical to A/B signals.
 C rows flow through the full pipeline — outcomes, BE/partial shadow management,
-order-flow snapshot, and the Tier/ArmSource analytics — so after a few weeks the
-data will say exactly what the continuation play earns versus the core model.
+and the Tier/ArmSource analytics — so after a few weeks the data will say exactly
+what the continuation play earns versus the core model.
 A++/A+/B behavior is completely unchanged.
 
 ---
@@ -372,7 +372,7 @@ A++/A+/B behavior is completely unchanged.
 | ⚠️ failed MSS (armed setup structurally invalidated) | candle close of the opposite MSS | on |
 | ❌ signal zone invalidated — the zone behind a still-open signal was consumed (exit/tighten cue) | tick for touch-based rules; candle close for BodyClose | on |
 | 🔁 zone re-touched — info only, no trade plan (first-touch signals stay exclusive; episodes separated by ≥1 clean bar away) | tick of re-entry | off |
-| 🚨 exit warning — an OPEN signal is threatened: opposing BoS/MSS printed, a fresh opposing zone was carved, or heavy opposing flow (delta against ≥ `ExitWarnDeltaShare` of volume at ≥ `ExitWarnVolFactor`× avg with the bar closing against); each threat class warns once per signal | candle close | on |
+| 🚨 exit warning — an OPEN signal is threatened: an opposing BoS/MSS printed, or displacement carved a fresh opposing zone; each threat class warns once per signal | candle close | on |
 | 📦 zone created | candle close | off |
 
 **Default delivery profile: Telegram-only, entries + exit warnings.** Popup alerts
@@ -501,59 +501,6 @@ Every `ZoneTouch` is therefore classifiable post-hoc: fired / PD-vetoed /
 model-not-armed / model-expired — with the numbers to prove which. Subsequent
 touch episodes journal as `ZoneRetouch` (touch number + zone age), so re-touch
 quality — does touch #2 reject or break through? — is measurable from the data.
-
-**Order-flow lens (observational).** ATAS's native bid/ask data adds an
-institutional layer to the audit: aggression (delta), effort vs result, and the
-footprint inside each candle. It never gates, delays, or modifies signal
-execution — it exists so the analytics can prove (or disprove) an order-flow edge
-before it earns any influence. Toggle: `OrderFlowEnabled` (default on).
-
-*Absorption detection* — an `Absorption` event is journaled when ALL of these hold
-on a completed bar (defaults in parentheses):
-
-1. **Effort** — volume ≥ `AbsorptionVolumeFactor` (1.3×) the average of the last
-   `OfVolumeLookback` (50) bars;
-2. **Aggression against the close** — |delta| ≥ `AbsorptionMinDeltaShare` (10%) of
-   the bar's volume, with the close on the opposite side: heavy selling but close
-   in the upper half = **bullish absorption** (passive buyers ate the selling);
-   mirror for bearish (defaults recalibrated after live GC data showed 15m bar
-   delta share rarely exceeds ~15%, so the original 25% never triggered);
-3. **Result failure** — range ≤ `AbsorptionMaxRangeAtr` (0.6×) ATR, or the close
-   pinned in the outer 40% of the bar against the aggression;
-4. **Location** — the bar overlaps an active zone or sits within
-   `EqualLevelTicks` of an unswept liquidity level (elsewhere it's noise).
-
-The event's Extra column records every number: volume (and ×avg), delta (and % of
-volume), min/max delta, range/ATR, close position, footprint POC position, stacked
-imbalance count, and the zone/level it happened at. When the feed provides
-footprint data, POC pinned at the extreme against the move and stacked diagonal
-imbalances (`OfImbalanceRatio` 3:1 across `OfStackedImbalances` 3 levels) are
-recorded as supporting evidence — never required. An optional 🧲 alert
-(`AlertOnAbsorption`, default off) can announce live absorption at a level.
-
-*Signal snapshot* — signals.csv captures the order flow at the exact tick each
-signal fires: `Vol`, `RelVol` (×average), `DeltaAtFire`, `DeltaPct`, `CVD`
-(session cumulative delta), `CvdSlope5` (CVD change over the last 5 bars),
-`PocPct` (POC position in the firing bar), `Imbalances` (stacked, `nB/nS`), and
-`Absorption` (same-direction absorption stamped on a matched zone within the last
-10 bars, e.g. `Bull 3 bars ago @ 4H FVG`).
-
-*Post-entry evolution* — outcomes.csv adds `OF_Delta5` (net delta over the first
-5 bars after entry, signed toward the trade: positive = flow agreed),
-`OF_AlignedPct` (% of bars whose delta agreed while the signal was open),
-`OF_CvdDrift` (CVD change entry→resolution, signed toward the trade), and
-`OF_AbsorptionAtEntry` (Yes/No).
-
-*Analytics* — two groupings sit alongside the zone/tier tables: `OF_Absorption`
-(entries with vs without absorption confluence) and `OF_EntryDelta`
-(Aligned / Opposed / Neutral delta at the firing tick) — each with the full
-AvgR / AvgBE1R_R / AvgPartial2R_R comparison. If absorption-confluent entries
-outperform over a few weeks, the case for promoting order flow from observer to
-filter will be in the numbers.
-
-Feeds without bid/ask splits are detected automatically (a one-time
-`OrderFlowInfo` event says so); delta-based columns then stay blank rather than
-logging fake zeros, and volume-based metrics keep working.
 
 ## 13. Honest limitations
 

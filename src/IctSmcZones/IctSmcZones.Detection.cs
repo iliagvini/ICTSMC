@@ -17,7 +17,6 @@ namespace IctSmc
                 return;
 
             UpdateAtr(bar);
-            UpdateOrderFlow(bar);
             ConfirmSwings(bar);
             DetectStructureBreak(bar);
             UpdateLegExtreme(bar);
@@ -743,7 +742,6 @@ namespace IctSmc
                 {
                     BucketStart = bucketStart,
                     FirstChartBar = bar,
-                    LastChartBar = bar,
                     Open = candle.Open,
                     High = candle.High,
                     Low = candle.Low,
@@ -755,7 +753,6 @@ namespace IctSmc
                 agg.Current.High = Math.Max(agg.Current.High, candle.High);
                 agg.Current.Low = Math.Min(agg.Current.Low, candle.Low);
                 agg.Current.Close = candle.Close;
-                agg.Current.LastChartBar = bar;
             }
 
             if (agg.Candles.Count > 400)

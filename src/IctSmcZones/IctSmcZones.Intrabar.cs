@@ -477,7 +477,6 @@ namespace IctSmc
                 ArmSource = string.IsNullOrEmpty(armSource) ? "Unknown" : armSource,
                 TriggerTag = trigger.Tag,
                 TriggerType = trigger.Type,
-                TriggerHtf = trigger.IsHtf,
                 Layer = trigger.IsHtf ? trigger.HtfLabel : "LTF",
                 ZoneTop = trigger.Top,
                 ZoneBottom = trigger.Bottom,
@@ -491,7 +490,6 @@ namespace IctSmc
                 TriggerZoneId = trigger.Id
             };
 
-            CaptureOrderFlowSnapshot(record, matches, bar);
             JournalSignal(record);
 
             if (!AlertOnEntry)
@@ -580,7 +578,6 @@ namespace IctSmc
                 ArmSource = "Continuation",
                 TriggerTag = zone.Tag,
                 TriggerType = zone.Type,
-                TriggerHtf = zone.IsHtf,
                 Layer = zone.IsHtf ? zone.HtfLabel : "LTF",
                 ZoneTop = zone.Top,
                 ZoneBottom = zone.Bottom,
@@ -594,7 +591,6 @@ namespace IctSmc
                 TriggerZoneId = zone.Id
             };
 
-            CaptureOrderFlowSnapshot(record, new List<Zone> { zone }, bar);
             JournalSignal(record);
 
             if (!AlertOnEntry)

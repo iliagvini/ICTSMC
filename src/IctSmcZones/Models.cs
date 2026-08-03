@@ -94,10 +94,6 @@ namespace IctSmc
         public int LastTouchedBar = -1;
         /// <summary>Distinct touch episodes so far (1 = first presentation).</summary>
         public int TouchEpisodes;
-        /// <summary>Bar of the most recent absorption event detected at this zone (-1 = none).</summary>
-        public int LastAbsorptionBar = -1;
-        /// <summary>Direction of that absorption (true = bullish, selling absorbed).</summary>
-        public bool LastAbsorptionBull;
 
         public bool IsBullish => Type is ZoneType.BullOrderBlock or ZoneType.BullFvg or ZoneType.BullIfvg;
         public bool IsOrderBlock => Type is ZoneType.BullOrderBlock or ZoneType.BearOrderBlock;
@@ -169,7 +165,6 @@ namespace IctSmc
         public string ArmSource = "";
         public string TriggerTag = "";
         public ZoneType TriggerType;
-        public bool TriggerHtf;
         public string Layer = "";
         public decimal ZoneTop;
         public decimal ZoneBottom;
@@ -205,32 +200,9 @@ namespace IctSmc
         public bool PartialDone;
         public decimal PartialR;
 
-        // Order-flow snapshot at the firing tick (observational; blank columns when
-        // not captured or the feed lacks bid/ask delta).
-        public bool OfCaptured;
-        public bool OfDeltaAvailable = true;
-        public decimal OfVolume;
-        public decimal OfRelVolume;
-        public decimal OfDelta;
-        public decimal OfDeltaShare;
-        public decimal OfCvd;
-        public decimal OfCvdSlope5;
-        public decimal OfPocPct = -1m;
-        public string OfImbalances = "";
-        public string OfAbsorption = "";
-        public bool OfAbsorptionAtEntry;
-
         // Exit-warning latches: each threat class warns at most once per signal.
         public bool WarnedStructure;
         public bool WarnedZone;
-        public bool WarnedFlow;
-
-        // Order-flow evolution after entry.
-        public decimal OfPostDelta5;
-        public int OfAlignedBars;
-        public int OfTrackedBars;
-        public decimal OfCvdAtEntry;
-        public decimal OfCvdDrift;
 
         public decimal Risk => System.Math.Abs(Entry - Sl);
 
@@ -247,7 +219,6 @@ namespace IctSmc
     {
         public DateTime BucketStart;
         public int FirstChartBar;
-        public int LastChartBar;
         public decimal Open;
         public decimal High;
         public decimal Low;

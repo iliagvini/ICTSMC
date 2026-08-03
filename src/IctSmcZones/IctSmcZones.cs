@@ -490,7 +490,6 @@ namespace IctSmc
             _legDirection = 0;
             _legAnchor = null;
             _legExtreme = null;
-            ResetOrderFlow();
             InitJournalSession();
         }
 

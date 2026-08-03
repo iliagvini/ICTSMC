@@ -36,10 +36,8 @@ toggle:
 - ❌ **Signal zone invalidated** — the FVG/iFVG/OB behind a still-open signal got
   consumed: the structural basis of the trade is gone, consider exiting/tightening
 - 🚨 **Exit warning** — an open signal is under threat: an opposing BoS/MSS printed,
-  displacement carved a fresh opposing zone, or **heavy opposing flow** hit (delta
-  against the trade ≥ 20% of bar volume at ≥ 1.3× average volume with the bar
-  closing against). Shows the signal, unrealized R and the exact metrics; each
-  threat class warns once per signal
+  or displacement carved a fresh opposing zone. Shows the signal, unrealized R and
+  the exact metrics; each threat class warns once per signal
 
 **Off by default (toggles):**
 
@@ -49,7 +47,6 @@ toggle:
 - ⚠️ **Failed MSS** — an armed setup structurally invalidated by an opposite MSS
 - 🔁 **Zone re-touched (info only)** — price returned to an already-touched zone
 - 📦 **Zone created**
-- 🧲 **Absorption** (Order Flow group)
 
 ### Telegram setup
 
@@ -134,31 +131,19 @@ never collide into one file even when they recalculate in the same second:
   **plus the full decision log**: `Armed` (source, sweep age, window), `ArmRejected`
   (exact reason a MSS failed to arm), `ArmExpired` (bars waited), `EntryRejected`
   (PD filter veto with zone mid vs EQ±tolerance and the exact excess), `SweepExpired` —
-  every signal that did NOT fire is explained with numbers, zero ambiguity — and
-  **`Absorption` events** (high volume + delta opposing the close at a zone/liquidity
-  level, with every metric: vol ×avg, delta %, range/ATR, close position, footprint
-  POC & stacked imbalances)
+  every signal that did NOT fire is explained with numbers, zero ambiguity
 - `*-signals.csv` — every entry signal with tier, arm source (Sweep / TrapArm /
-  Sweep+Trap), trigger zone, entry/SL/TP2/TP3, PD status, confluence stack, **plus the
-  order-flow snapshot at the firing tick** (Vol, RelVol, delta, delta %, CVD, CVD
-  slope, POC position, stacked imbalances, recent absorption at the zone)
+  Sweep+Trap), trigger zone, entry/SL/TP2/TP3, PD status, confluence stack
 - `*-outcomes.csv` — resolution per signal (SL / TP2 / TP3 / Timeout, conservative
   SL-first on ambiguous bars), R-multiple, **MAE/MFE in R**, bars held, plus two
   **shadow trade-management results** simulated in parallel for every signal
   (columns `BE1R_R` / `Partial2R_R`): what the trade would have made with the stop
   moved to breakeven at +1R, and with half banked at +2R (stop to entry on the rest,
-  runner to TP3), plus **post-entry order flow**: net delta over the first 5 bars,
-  % of bars with aligned delta, CVD drift entry→exit, absorption-at-entry flag
+  runner to TP3)
 - `*-analytics.csv` — win-rate & expectancy grouped by zone family (OB/FVG/iFVG),
   layer (LTF/4H/D…), arm source, tier, direction — answers "does TrapArm beat Sweep?"
   and "which zones hit best?" directly; `AvgBE1R_R` / `AvgPartial2R_R` sit next to
-  `AvgR` in every row so the three management styles are directly comparable per group;
-  `OF_Absorption` and `OF_EntryDelta` groupings answer "does order flow add edge?"
-  (entries with vs without absorption confluence; delta aligned vs opposed at fire)
-
-Order-flow tracking is **observational only** — it never gates or delays a signal.
-Settings live under `12. Order Flow`; the exact absorption definition is in the
-PLAYBOOK. Feeds without bid/ask data are auto-detected and delta columns stay blank.
+  `AvgR` in every row so the three management styles are directly comparable per group
 
 Rows are flagged `LIVE` or `HIST` — historical rows are a built-in backtest of the
 exact same code path the live signals use.
@@ -173,7 +158,6 @@ src/IctSmcZones/
   IctSmcZones.Detection.cs      bar-close engine: swings, BoS/MSS, FVG, OB, HTF
   IctSmcZones.Intrabar.cs       tick engine: touches, sweeps, entry model, alerts, Telegram
   IctSmcZones.Rendering.cs      custom drawing: zones, liquidity, structure, premium/discount
-  IctSmcZones.OrderFlow.cs      observational order-flow lens: absorption, CVD, footprint
   IctSmcZones.Journal.cs        audit pipeline: events, signals, outcomes, analytics CSVs
   IctSmcZones.TelegramRemote.cs /shot command hub + self-rendered chart snapshots
 docs/STRATEGY.md                how each book concept maps to code
