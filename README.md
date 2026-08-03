@@ -157,7 +157,7 @@ signals use; nothing is ever lost because replay always rebuilds it from the can
 src/IctSmcZones/
   IctSmcZones.csproj            project (references ATAS DLLs)
   Models.cs                     zone / liquidity / structure / HTF models
-  IctSmcZones.cs                settings + lifecycle + state
+  ICTSMCStrategy.cs             settings + lifecycle + state
   IctSmcZones.Detection.cs      bar-close engine: swings, BoS/MSS, FVG, OB, HTF
   IctSmcZones.Intrabar.cs       tick engine: touches, sweeps, entry model, alerts, Telegram
   IctSmcZones.Rendering.cs      custom drawing: zones, liquidity, structure, premium/discount
