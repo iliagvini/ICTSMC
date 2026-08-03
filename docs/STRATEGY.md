@@ -8,7 +8,7 @@ institutional ICT extensions the book only hints at) to the exact place in the c
 > “Liquidity = stop losses + pending orders sitting at obvious levels.”
 
 - Every confirmed fractal swing high registers a **BSL** level at its high; every swing
-  low registers **SSL** (`IctSmcZones.Detection.cs → RegisterLiquidity`).
+  low registers **SSL** (`ICTSMCStrategy.Detection.cs → RegisterLiquidity`).
 - Swings within `EqualLevelTicks` of an existing unswept level are merged into a single
   pool flagged **EQH/EQL** — rendered thicker because clustered stops are a stronger draw.
 - **Sweep detection is intrabar** (`Intrabar.cs → CheckLiquiditySweeps`): the alert fires

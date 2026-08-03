@@ -82,18 +82,22 @@ Requirements: .NET 10 SDK (ATAS X) or .NET 8 SDK (older ATAS Platform), ATAS ins
 
 ```bash
 # ATAS X (default — targets net10.0-windows, probes "C:\Program Files\ATAS X" automatically)
-dotnet build src/IctSmcZones/IctSmcZones.csproj -c Release
+dotnet build src/ICTSMCStrategy/ICTSMCStrategy.csproj -c Release
 
 # explicit path
-dotnet build src/IctSmcZones/IctSmcZones.csproj -c Release -p:AtasPath="C:\Program Files\ATAS X"
+dotnet build src/ICTSMCStrategy/ICTSMCStrategy.csproj -c Release -p:AtasPath="C:\Program Files\ATAS X"
 
 # older .NET 8-based ATAS Platform
-dotnet build src/IctSmcZones/IctSmcZones.csproj -c Release -p:AtasTfm=net8.0-windows -p:AtasPath="C:\Program Files (x86)\ATAS Platform"
+dotnet build src/ICTSMCStrategy/ICTSMCStrategy.csproj -c Release -p:AtasTfm=net8.0-windows -p:AtasPath="C:\Program Files (x86)\ATAS Platform"
 ```
 
-Copy `src/IctSmcZones/bin/Release/IctSmcZones.dll` into
+Copy `src/ICTSMCStrategy/bin/Release/IctSmcZones.dll` into
 `%USERPROFILE%\Documents\ATAS\Indicators`, restart ATAS, and add
 **“ICT/SMC Strategy”** (Order Flow category) to the chart.
+
+> The output DLL keeps its original `IctSmcZones` name on purpose: ATAS keys each
+> chart's saved indicator settings and templates to the compiled assembly/type
+> identity, so renaming the binary would orphan every configured chart.
 
 > The project references `ATAS.Indicators.dll` and `OFT.Rendering.dll` from your ATAS
 > installation. ATAS occasionally moves types between versions — if the compiler
@@ -154,15 +158,15 @@ signals use; nothing is ever lost because replay always rebuilds it from the can
 ## Repository layout
 
 ```
-src/IctSmcZones/
-  IctSmcZones.csproj            project (references ATAS DLLs)
+src/ICTSMCStrategy/
+  ICTSMCStrategy.csproj            project (references ATAS DLLs)
   Models.cs                     zone / liquidity / structure / HTF models
   ICTSMCStrategy.cs             settings + lifecycle + state
-  IctSmcZones.Detection.cs      bar-close engine: swings, BoS/MSS, FVG, OB, HTF
-  IctSmcZones.Intrabar.cs       tick engine: touches, sweeps, entry model, alerts, Telegram
-  IctSmcZones.Rendering.cs      custom drawing: zones, liquidity, structure, premium/discount
-  IctSmcZones.Journal.cs        audit pipeline: events, signals, outcomes, analytics CSVs
-  IctSmcZones.TelegramRemote.cs /shot command hub + self-rendered chart snapshots
+  ICTSMCStrategy.Detection.cs      bar-close engine: swings, BoS/MSS, FVG, OB, HTF
+  ICTSMCStrategy.Intrabar.cs       tick engine: touches, sweeps, entry model, alerts, Telegram
+  ICTSMCStrategy.Rendering.cs      custom drawing: zones, liquidity, structure, premium/discount
+  ICTSMCStrategy.Journal.cs        audit pipeline: events, signals, outcomes, analytics CSVs
+  ICTSMCStrategy.TelegramRemote.cs /shot command hub + self-rendered chart snapshots
 docs/STRATEGY.md                how each book concept maps to code
 ```
 

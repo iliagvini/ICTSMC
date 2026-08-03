@@ -11,6 +11,12 @@
     <UseWindowsForms>true</UseWindowsForms>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
+    <!--
+      Deliberately pinned to the ORIGINAL assembly/type identity: ATAS keys each
+      chart's saved indicator settings and templates to it. Renaming the assembly
+      or namespace would orphan every configured chart. Repo artifacts (folder,
+      files, project) carry the new ICTSMCStrategy name; the binary stays stable.
+    -->
     <AssemblyName>IctSmcZones</AssemblyName>
     <RootNamespace>IctSmc</RootNamespace>
     <!-- ATAS install folder: pass /p:AtasPath=... to override; ATAS X is probed first. -->
