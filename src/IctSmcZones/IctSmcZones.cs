@@ -385,6 +385,9 @@ namespace IctSmc
         [Display(GroupName = GrpAlerts, Name = "Alert: signal zone invalidated", Order = 957)]
         public bool AlertOnSignalZoneInvalidated { get; set; } = true;
 
+        [Display(GroupName = GrpAlerts, Name = "Alert: zone re-touched (info only)", Order = 958)]
+        public bool AlertOnZoneRetouch { get; set; } = true;
+
         #endregion
 
         #region Telegram settings

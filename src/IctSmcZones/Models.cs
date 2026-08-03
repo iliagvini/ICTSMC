@@ -89,6 +89,11 @@ namespace IctSmc
         public bool PdRejectLogged;
         /// <summary>Latch: a C-tier continuation signal already fired from this zone.</summary>
         public bool ContinuationFired;
+        /// <summary>Last bar on which price was in contact with the zone (-1 = never).
+        /// A gap of a full untouched bar separates distinct touch episodes.</summary>
+        public int LastTouchedBar = -1;
+        /// <summary>Distinct touch episodes so far (1 = first presentation).</summary>
+        public int TouchEpisodes;
         /// <summary>Bar of the most recent absorption event detected at this zone (-1 = none).</summary>
         public int LastAbsorptionBar = -1;
         /// <summary>Direction of that absorption (true = bullish, selling absorbed).</summary>

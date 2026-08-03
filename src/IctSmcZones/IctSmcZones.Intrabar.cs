@@ -84,10 +84,32 @@ namespace IctSmc
                 if (!touched)
                     continue;
 
+                // Distinct touch episodes: contact on consecutive bars is ONE episode;
+                // a full untouched bar in between separates two.
+                var isRetouch = zone.LastTouchedBar >= 0 && bar > zone.LastTouchedBar + 1;
+                zone.LastTouchedBar = bar;
+
                 if (zone.State == ZoneState.Active)
                 {
                     zone.State = ZoneState.Touched;
+                    zone.TouchEpisodes = 1;
                     TryEmitContinuationSignal(zone, bar);
+                }
+                else if (isRetouch && zone.State == ZoneState.Touched)
+                {
+                    zone.TouchEpisodes++;
+                    var age = bar - zone.StartBar;
+
+                    JournalEvent(bar, "ZoneRetouch", zone.IsBullish ? "Bull" : "Bear", zone, candle.Close,
+                        $"touch #{zone.TouchEpisodes}; zone age {age} bars");
+
+                    // Info only, deliberately NOT a trade signal: the first presentation
+                    // consumed the one-signal-per-zone budget; re-touches are weaker.
+                    if (AlertOnZoneRetouch)
+                        Fire($"🔁 Zone re-touched — {zone.Tag} (info only)\n" +
+                             $"📍 Zone: {FormatPrice(zone.Bottom)}–{FormatPrice(zone.Top)}\n" +
+                             $"🔢 Touch #{zone.TouchEpisodes} · zone is {age} bars old\n" +
+                             "ℹ️ No signal: first touch already consumed — re-touches are lower probability");
                 }
 
                 if (!zone.TouchLogged)

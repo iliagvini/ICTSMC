@@ -371,6 +371,7 @@ A++/A+/B behavior is completely unchanged.
 | 🟢/🔴 entry model (tiered, full trade plan + confluence + PD status) | tick of the return | on |
 | ⚠️ failed MSS (armed setup structurally invalidated) | candle close of the opposite MSS | on |
 | ❌ signal zone invalidated — the zone behind a still-open signal was consumed (exit/tighten cue) | tick for touch-based rules; candle close for BodyClose | on |
+| 🔁 zone re-touched — info only, no trade plan (first-touch signals stay exclusive; episodes separated by ≥1 clean bar away) | tick of re-entry | on |
 | 📦 zone created | candle close | off |
 
 - **Realtime-gated** — never fires during history replay.
@@ -489,7 +490,9 @@ point in the entry model writes an event with exact metrics:
 | `FailedMSS` | armed setup structurally cancelled | cancelling MSS level, armed-at bar, bars in, window remaining, trap-arm result |
 
 Every `ZoneTouch` is therefore classifiable post-hoc: fired / PD-vetoed /
-model-not-armed / model-expired — with the numbers to prove which.
+model-not-armed / model-expired — with the numbers to prove which. Subsequent
+touch episodes journal as `ZoneRetouch` (touch number + zone age), so re-touch
+quality — does touch #2 reject or break through? — is measurable from the data.
 
 **Order-flow lens (observational).** ATAS's native bid/ask data adds an
 institutional layer to the audit: aggression (delta), effort vs result, and the

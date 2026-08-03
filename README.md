@@ -36,6 +36,8 @@ per zone/level/event:
   (often the seed of the reverse trade)
 - ❌ **Signal zone invalidated** — the FVG/iFVG/OB behind a still-open signal got
   consumed: the structural basis of the trade is gone, consider exiting/tightening
+- 🔁 **Zone re-touched (info only)** — price returned to an already-touched zone
+  (after at least one clean bar away); no trade plan, first-touch signals stay king
 - 📦 **Zone created** (off by default)
 
 ### Telegram setup
