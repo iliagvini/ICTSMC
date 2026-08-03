@@ -371,8 +371,15 @@ A++/A+/B behavior is completely unchanged.
 | 🟢/🔴 entry model (tiered, full trade plan + confluence + PD status) | tick of the return | on |
 | ⚠️ failed MSS (armed setup structurally invalidated) | candle close of the opposite MSS | on |
 | ❌ signal zone invalidated — the zone behind a still-open signal was consumed (exit/tighten cue) | tick for touch-based rules; candle close for BodyClose | on |
-| 🔁 zone re-touched — info only, no trade plan (first-touch signals stay exclusive; episodes separated by ≥1 clean bar away) | tick of re-entry | on |
+| 🔁 zone re-touched — info only, no trade plan (first-touch signals stay exclusive; episodes separated by ≥1 clean bar away) | tick of re-entry | off |
+| 🚨 exit warning — an OPEN signal is threatened: opposing BoS/MSS printed, a fresh opposing zone was carved, or heavy opposing flow (delta against ≥ `ExitWarnDeltaShare` of volume at ≥ `ExitWarnVolFactor`× avg with the bar closing against); each threat class warns once per signal | candle close | on |
 | 📦 zone created | candle close | off |
+
+**Default delivery profile: Telegram-only, entries + exit warnings.** Popup alerts
+default OFF, and the only alert types on by default are the entry signals
+(🟢/🔴/🟡), the ❌ signal-zone invalidation and the 🚨 exit warning — the messages
+you act on. Sweeps, structure, touches and re-touches remain available as toggles
+for anyone who wants the full narration back.
 
 - **Realtime-gated** — never fires during history replay.
 - **De-duplicated** — one touch alert per zone lifetime, one sweep alert per level, one
@@ -488,6 +495,7 @@ point in the entry model writes an event with exact metrics:
 | `SweepExpired` | sweep aged out with no MSS | sweep bar, age vs window |
 | `RangeAnchored` | dealing range re-anchored on BoS/MSS | leg high/low with their bars, resulting EQ |
 | `FailedMSS` | armed setup structurally cancelled | cancelling MSS level, armed-at bar, bars in, window remaining, trap-arm result |
+| `ExitWarning` | open signal threatened (structure / opposing zone / opposing flow) | signal id + tier + source + trigger, entry, unrealized R at warning, exact threat metrics |
 
 Every `ZoneTouch` is therefore classifiable post-hoc: fired / PD-vetoed /
 model-not-armed / model-expired — with the numbers to prove which. Subsequent

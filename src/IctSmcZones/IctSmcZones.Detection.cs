@@ -25,6 +25,7 @@ namespace IctSmc
             ApplyBodyCloseMitigation(bar);
             UpdateHtf(bar);
             UpdateOpenSignals(bar);
+            CheckOpenSignalThreats(bar);
             Prune(bar);
             FlushJournalBuffers();
         }

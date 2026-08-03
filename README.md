@@ -22,23 +22,34 @@ candle to close.
 ## Alerts
 
 All alerts fire **only in realtime** (never while history is replayed) and are de-duplicated
-per zone/level/event:
+per zone/level/event. **Default delivery profile: Telegram-only** (popups off) carrying
+just the actionable messages — entries and exit warnings; everything else is an opt-in
+toggle:
 
-- 🎯 **Zone touch** — instant, on the first tick into an FVG/OB (no close needed)
-- 💧 **Liquidity taken** — BSL/SSL crossed, with the follow-up hint (watch for MSS)
-- 📐 **BoS / MSS** — structure events with direction
+**On by default:**
+
 - 🟢/🔴 **Entry model** — sweep + MSS + return to zone, tiered by confluence
   (🟢🟢🟢 A++ with Daily/Weekly zone, 🟢🟢 A+ with any HTF zone, 🟢 B standalone;
   🟡 **C** = trend-aligned fresh-zone *continuation* touch outside the core model —
   explicitly labeled Non-ICT, lowest tier, tracked separately in analytics),
   with zone stack, PD status (Discount/Near EQ/Premium), entry, SL and 2R/3R targets
-- ⚠️ **Failed MSS** — an armed setup structurally invalidated by an opposite MSS
-  (often the seed of the reverse trade)
 - ❌ **Signal zone invalidated** — the FVG/iFVG/OB behind a still-open signal got
   consumed: the structural basis of the trade is gone, consider exiting/tightening
+- 🚨 **Exit warning** — an open signal is under threat: an opposing BoS/MSS printed,
+  displacement carved a fresh opposing zone, or **heavy opposing flow** hit (delta
+  against the trade ≥ 20% of bar volume at ≥ 1.3× average volume with the bar
+  closing against). Shows the signal, unrealized R and the exact metrics; each
+  threat class warns once per signal
+
+**Off by default (toggles):**
+
+- 🎯 **Zone touch** — instant, on the first tick into an FVG/OB (no close needed)
+- 💧 **Liquidity taken** — BSL/SSL crossed, with the follow-up hint (watch for MSS)
+- 📐 **BoS / MSS** — structure events with direction
+- ⚠️ **Failed MSS** — an armed setup structurally invalidated by an opposite MSS
 - 🔁 **Zone re-touched (info only)** — price returned to an already-touched zone
-  (after at least one clean bar away); no trade plan, first-touch signals stay king
-- 📦 **Zone created** (off by default)
+- 📦 **Zone created**
+- 🧲 **Absorption** (Order Flow group)
 
 ### Telegram setup
 

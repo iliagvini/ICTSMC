@@ -454,6 +454,99 @@ namespace IctSmc
             }
         }
 
+        /// <summary>
+        /// Early-exit radar, run each completed bar AFTER UpdateOpenSignals (so a
+        /// signal resolved this bar never warns). Three deterministic threat
+        /// classes, each warning AT MOST ONCE per signal:
+        ///  1. opposing structure — a BoS/MSS printed against the trade this bar;
+        ///  2. opposing pattern  — displacement against the position just carved a
+        ///     fresh opposing zone (StartBar within the last bar);
+        ///  3. heavy opposing flow — |delta| against the trade ≥ ExitWarnDeltaShare
+        ///     of bar volume at ≥ ExitWarnVolFactor × average volume AND the bar
+        ///     closed against the trade (effort + result; absorption-shaped bars
+        ///     where price holds do NOT warn).
+        /// Warnings are journaled (HIST and LIVE) so their predictive value is
+        /// measurable later; the 🚨 alert itself is realtime-gated as usual.
+        /// </summary>
+        private void CheckOpenSignalThreats(int bar)
+        {
+            if (!AlertOnExitWarning || _openSignals.Count == 0)
+                return;
+
+            var candle = GetCandle(bar);
+
+            foreach (var s in _openSignals)
+            {
+                if (s.Resolved || bar <= s.SignalBar)
+                    continue;
+
+                if (!s.WarnedStructure)
+                {
+                    var evt = _structure.LastOrDefault(e => e.Bar == bar && e.Bullish != s.Long);
+                    if (evt != null)
+                    {
+                        s.WarnedStructure = true;
+                        EmitExitWarning(s, bar, candle.Close,
+                            $"{(evt.IsMss ? "MSS" : "BoS")} printed against the trade @ {FormatPrice(evt.Level)}" +
+                            (evt.IsMss ? " — structure shifted" : " — opposing momentum confirmed"));
+                    }
+                }
+
+                if (!s.WarnedZone)
+                {
+                    var opp = _zones.LastOrDefault(z =>
+                        z.State != ZoneState.Mitigated &&
+                        z.StartBar >= bar - 1 &&
+                        z.Id != s.TriggerZoneId &&
+                        z.IsBullish != s.Long);
+                    if (opp != null)
+                    {
+                        s.WarnedZone = true;
+                        EmitExitWarning(s, bar, candle.Close,
+                            $"fresh opposing {opp.Tag} carved at {FormatPrice(opp.Bottom)}–{FormatPrice(opp.Top)}");
+                    }
+                }
+
+                if (!s.WarnedFlow && OrderFlowEnabled && _ofDeltaAvailable)
+                {
+                    var vol = candle.Volume;
+                    var avg = _ofVolWindow.Count > 0 ? _ofVolSum / _ofVolWindow.Count : 0m;
+
+                    if (vol > 0 && avg > 0)
+                    {
+                        var opposingShare = (s.Long ? -candle.Delta : candle.Delta) / vol;
+                        var relVol = vol / avg;
+                        var closedAgainst = s.Long ? candle.Close < candle.Open : candle.Close > candle.Open;
+
+                        if (opposingShare >= ExitWarnDeltaShare && relVol >= ExitWarnVolFactor && closedAgainst)
+                        {
+                            s.WarnedFlow = true;
+                            var sharePct = (opposingShare * 100m).ToString("0", CultureInfo.InvariantCulture);
+                            var relTxt = relVol.ToString("0.0", CultureInfo.InvariantCulture);
+                            EmitExitWarning(s, bar, candle.Close,
+                                $"heavy opposing flow: {(s.Long ? "sell" : "buy")} delta {sharePct}% of volume at {relTxt}x avg volume, bar closed against the trade");
+                        }
+                    }
+                }
+            }
+        }
+
+        private void EmitExitWarning(SignalRecord s, int bar, decimal close, string reason)
+        {
+            var unrealized = s.Risk > 0
+                ? (s.Long ? close - s.Entry : s.Entry - close) / s.Risk
+                : 0m;
+            var rTxt = unrealized.ToString("+0.00;-0.00", CultureInfo.InvariantCulture) + "R";
+
+            JournalEvent(bar, "ExitWarning", s.Long ? "Bull" : "Bear", null, close,
+                $"signal #{s.Id} ({s.Tier} {s.ArmSource} {s.TriggerTag}); entry {Num(s.Entry)}; unrealized {rTxt}; {reason}");
+
+            Fire($"🚨 EXIT WARNING — open {(s.Long ? "LONG" : "SHORT")} (signal #{s.Id}, {s.Tier}) under threat\n" +
+                 $"📍 Entry {FormatPrice(s.Entry)} · now {FormatPrice(close)} ({rTxt})\n" +
+                 $"⚠️ Reason: {reason}\n" +
+                 "👋 Consider exiting, tightening the stop, or stepping aside");
+        }
+
         private void Resolve(SignalRecord s, int bar, string outcome, decimal exit, decimal rMultiple)
         {
             s.Resolved = true;

@@ -359,7 +359,7 @@ namespace IctSmc
         #region Alert settings
 
         [Display(GroupName = GrpAlerts, Name = "Popup alerts", Order = 900)]
-        public bool UsePopupAlerts { get; set; } = true;
+        public bool UsePopupAlerts { get; set; } = false;
 
         [Display(GroupName = GrpAlerts, Name = "Alert sound file", Order = 905)]
         public string AlertFile { get; set; } = "alert1";
@@ -368,25 +368,28 @@ namespace IctSmc
         public bool AlertOnZoneCreated { get; set; } = false;
 
         [Display(GroupName = GrpAlerts, Name = "Alert: zone touched (instant)", Order = 920)]
-        public bool AlertOnZoneTouch { get; set; } = true;
+        public bool AlertOnZoneTouch { get; set; } = false;
 
         [Display(GroupName = GrpAlerts, Name = "Alert: liquidity sweep", Order = 930)]
-        public bool AlertOnSweep { get; set; } = true;
+        public bool AlertOnSweep { get; set; } = false;
 
         [Display(GroupName = GrpAlerts, Name = "Alert: BoS / MSS", Order = 940)]
-        public bool AlertOnStructure { get; set; } = true;
+        public bool AlertOnStructure { get; set; } = false;
 
         [Display(GroupName = GrpAlerts, Name = "Alert: entry-model signal", Order = 950)]
         public bool AlertOnEntry { get; set; } = true;
 
         [Display(GroupName = GrpAlerts, Name = "Alert: failed MSS", Order = 955)]
-        public bool AlertOnFailedMss { get; set; } = true;
+        public bool AlertOnFailedMss { get; set; } = false;
 
         [Display(GroupName = GrpAlerts, Name = "Alert: signal zone invalidated", Order = 957)]
         public bool AlertOnSignalZoneInvalidated { get; set; } = true;
 
         [Display(GroupName = GrpAlerts, Name = "Alert: zone re-touched (info only)", Order = 958)]
-        public bool AlertOnZoneRetouch { get; set; } = true;
+        public bool AlertOnZoneRetouch { get; set; } = false;
+
+        [Display(GroupName = GrpAlerts, Name = "Alert: exit warning (open signal threatened)", Order = 959)]
+        public bool AlertOnExitWarning { get; set; } = true;
 
         #endregion
 

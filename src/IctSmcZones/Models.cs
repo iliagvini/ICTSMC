@@ -220,6 +220,11 @@ namespace IctSmc
         public string OfAbsorption = "";
         public bool OfAbsorptionAtEntry;
 
+        // Exit-warning latches: each threat class warns at most once per signal.
+        public bool WarnedStructure;
+        public bool WarnedZone;
+        public bool WarnedFlow;
+
         // Order-flow evolution after entry.
         public decimal OfPostDelta5;
         public int OfAlignedBars;

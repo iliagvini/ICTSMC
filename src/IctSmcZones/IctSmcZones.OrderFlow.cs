@@ -65,6 +65,14 @@ namespace IctSmc
         [Display(GroupName = GrpOrderFlow, Name = "Alert on absorption", Order = 1270)]
         public bool AlertOnAbsorption { get; set; } = false;
 
+        [Display(GroupName = GrpOrderFlow, Name = "Exit warning: min opposing delta share", Order = 1280)]
+        [Range(0.05, 0.9)]
+        public decimal ExitWarnDeltaShare { get; set; } = 0.20m;
+
+        [Display(GroupName = GrpOrderFlow, Name = "Exit warning: min volume vs average (x)", Order = 1285)]
+        [Range(1.0, 10.0)]
+        public decimal ExitWarnVolFactor { get; set; } = 1.3m;
+
         #endregion
 
         #region State
