@@ -465,7 +465,8 @@ namespace IctSmc
                 Tp3 = tp3,
                 PdStatus = pdStatus,
                 Confluence = confluence,
-                SignalBar = bar
+                SignalBar = bar,
+                TriggerZoneId = trigger.Id
             };
 
             CaptureOrderFlowSnapshot(record, matches, bar);
@@ -567,7 +568,8 @@ namespace IctSmc
                 Tp3 = tp3,
                 PdStatus = pdStatus,
                 Confluence = $"Non-ICT concept · momentum continuation · {reason}",
-                SignalBar = bar
+                SignalBar = bar,
+                TriggerZoneId = zone.Id
             };
 
             CaptureOrderFlowSnapshot(record, new List<Zone> { zone }, bar);

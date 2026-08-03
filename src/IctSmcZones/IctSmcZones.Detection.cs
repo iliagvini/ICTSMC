@@ -491,6 +491,19 @@ namespace IctSmc
             zone.State = ZoneState.Mitigated;
             zone.EndBar = bar;
             JournalEvent(bar, "ZoneMitigated", zone.IsBullish ? "Bull" : "Bear", zone, 0m, "");
+
+            // Position-management alert: the zone behind a still-open signal just
+            // died — whoever entered off it should know the structural basis is gone.
+            // Fires once per zone (this method is idempotent) and only in realtime.
+            if (AlertOnSignalZoneInvalidated)
+            {
+                var affected = _openSignals.FirstOrDefault(s => !s.Resolved && s.TriggerZoneId == zone.Id);
+                if (affected != null)
+                    Fire($"❌ Signal zone invalidated — {zone.Tag}\n" +
+                         $"📍 Zone: {FormatPrice(zone.Bottom)}–{FormatPrice(zone.Top)}\n" +
+                         $"⚠️ The zone behind the open {(affected.Long ? "LONG" : "SHORT")} (signal #{affected.Id}, {affected.Tier}) has been consumed\n" +
+                         $"👋 If you're still in the trade: structural basis is gone — consider exiting or tightening the stop");
+            }
         }
 
         private void Prune(int bar)

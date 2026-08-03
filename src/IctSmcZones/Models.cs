@@ -175,6 +175,8 @@ namespace IctSmc
         public string PdStatus = "";
         public string Confluence = "";
         public int SignalBar;
+        /// <summary>Id of the zone that triggered this signal (for invalidation alerts).</summary>
+        public int TriggerZoneId;
 
         // Excursion tracking (absolute price units; reported in R).
         public decimal Mae;

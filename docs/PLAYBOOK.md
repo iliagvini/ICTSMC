@@ -370,6 +370,7 @@ A++/A+/B behavior is completely unchanged.
 | 📐 BoS / MSS (direction + meaning) | candle close | on |
 | 🟢/🔴 entry model (tiered, full trade plan + confluence + PD status) | tick of the return | on |
 | ⚠️ failed MSS (armed setup structurally invalidated) | candle close of the opposite MSS | on |
+| ❌ signal zone invalidated — the zone behind a still-open signal was consumed (exit/tighten cue) | tick for touch-based rules; candle close for BodyClose | on |
 | 📦 zone created | candle close | off |
 
 - **Realtime-gated** — never fires during history replay.

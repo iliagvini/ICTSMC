@@ -34,6 +34,8 @@ per zone/level/event:
   with zone stack, PD status (Discount/Near EQ/Premium), entry, SL and 2R/3R targets
 - ⚠️ **Failed MSS** — an armed setup structurally invalidated by an opposite MSS
   (often the seed of the reverse trade)
+- ❌ **Signal zone invalidated** — the FVG/iFVG/OB behind a still-open signal got
+  consumed: the structural basis of the trade is gone, consider exiting/tightening
 - 📦 **Zone created** (off by default)
 
 ### Telegram setup

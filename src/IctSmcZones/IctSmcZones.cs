@@ -382,6 +382,9 @@ namespace IctSmc
         [Display(GroupName = GrpAlerts, Name = "Alert: failed MSS", Order = 955)]
         public bool AlertOnFailedMss { get; set; } = true;
 
+        [Display(GroupName = GrpAlerts, Name = "Alert: signal zone invalidated", Order = 957)]
+        public bool AlertOnSignalZoneInvalidated { get; set; } = true;
+
         #endregion
 
         #region Telegram settings
