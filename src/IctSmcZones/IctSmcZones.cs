@@ -21,7 +21,7 @@ namespace IctSmc
     ///  • Popup + Telegram alerts, fired intrabar the moment price TOUCHES a zone
     ///    (no waiting for candle close — price often reacts instantly on the tap).
     /// </summary>
-    [DisplayName("ICT/SMC Zones + Telegram")]
+    [DisplayName("ICT/SMC Strategy")]
     [Category("Order Flow")]
     public partial class IctSmcZones : Indicator
     {

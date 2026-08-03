@@ -93,7 +93,7 @@ dotnet build src/IctSmcZones/IctSmcZones.csproj -c Release -p:AtasTfm=net8.0-win
 
 Copy `src/IctSmcZones/bin/Release/IctSmcZones.dll` into
 `%USERPROFILE%\Documents\ATAS\Indicators`, restart ATAS, and add
-**“ICT/SMC Zones + Telegram”** (Order Flow category) to the chart.
+**“ICT/SMC Strategy”** (Order Flow category) to the chart.
 
 > The project references `ATAS.Indicators.dll` and `OFT.Rendering.dll` from your ATAS
 > installation. ATAS occasionally moves types between versions — if the compiler
