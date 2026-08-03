@@ -91,13 +91,14 @@ dotnet build src/ICTSMCStrategy/ICTSMCStrategy.csproj -c Release -p:AtasPath="C:
 dotnet build src/ICTSMCStrategy/ICTSMCStrategy.csproj -c Release -p:AtasTfm=net8.0-windows -p:AtasPath="C:\Program Files (x86)\ATAS Platform"
 ```
 
-Copy `src/ICTSMCStrategy/bin/Release/IctSmcZones.dll` into
+Copy `src/ICTSMCStrategy/bin/Release/ICTSMCStrategy.dll` into
 `%USERPROFILE%\Documents\ATAS\Indicators`, restart ATAS, and add
 **“ICT/SMC Strategy”** (Order Flow category) to the chart.
 
-> The output DLL keeps its original `IctSmcZones` name on purpose: ATAS keys each
-> chart's saved indicator settings and templates to the compiled assembly/type
-> identity, so renaming the binary would orphan every configured chart.
+> Upgrading from a build older than the rename? Delete the old `IctSmcZones.dll`
+> from the Indicators folder first — leaving both DLLs in place makes ATAS load
+> the same indicator twice (duplicate list entries, ambiguous chart bindings).
+> Charts configured against the old assembly need the indicator re-added once.
 
 > The project references `ATAS.Indicators.dll` and `OFT.Rendering.dll` from your ATAS
 > installation. ATAS occasionally moves types between versions — if the compiler
