@@ -345,15 +345,23 @@ on the **first touch** of a zone when ALL of these hold (toggle
 `ContinuationSignalsEnabled`, default on):
 
 1. **trend-aligned** — bullish zone with bullish tracked structure (mirror for
-   shorts); never counter-trend;
+   shorts) — **or the sweep-reversal exception**: counter-trend is allowed when a
+   *same-side* liquidity sweep is still inside its `SweepToMssWindow` (the ICT
+   inversion-reversal entry that lives between the sweep and the MSS that will
+   officially flip the trend; toggle `ContinuationAfterSweep`, default on; such
+   signals carry `ArmSource=SweepRev` so the analytics grade them separately);
 2. **fresh** — the zone is at most `ContinuationMaxAgeBars` (20) bars old;
 3. **outside the core model** — that side is unarmed (no sweep→MSS chain) *or*
    armed but the zone fails the PD limit (the premium-continuation case). If the
    armed model can fire from the zone, C stays silent — never a double signal;
 4. **once per zone**.
 
-The alert and journal row state the exact exclusion reason (`no sweep→MSS chain` /
-`PD override`), and the plan math (entry/SL/TP2/TP3) is identical to A/B signals.
+The alert and journal row state the exact firing reason (`no sweep→MSS chain` /
+`PD override` / `sweep-reversal: SSL swept N bars ago — awaiting MSS`), and the
+plan math (entry/SL/TP2/TP3) is identical to A/B signals. **Every C-tier veto is
+journaled too** — a `ContinuationRejected` decision event records exactly which
+rule failed with its numbers (trend state + sweep age vs window, zone age vs
+limit, or armed-model ownership), so a silent zone touch is always explainable.
 C rows flow through the full pipeline — outcomes, BE/partial shadow management,
 and the Tier/ArmSource analytics — so after a few weeks the data will say exactly
 what the continuation play earns versus the core model.
@@ -499,7 +507,8 @@ point in the entry model writes an event with exact metrics:
 | `SweepExpired` | sweep aged out with no MSS | sweep bar, age vs window |
 | `RangeAnchored` | dealing range re-anchored on BoS/MSS | leg high/low with their bars, resulting EQ |
 | `FailedMSS` | armed setup structurally cancelled | cancelling MSS level, armed-at bar, bars in, window remaining, trap-arm result |
-| `ExitWarning` | open signal threatened (structure / opposing zone / opposing flow) | signal id + tier + source + trigger, entry, unrealized R at warning, exact threat metrics |
+| `ExitWarning` | open signal threatened (opposing structure / fresh opposing zone) | signal id + tier + source + trigger, entry, unrealized R at warning, exact threat metrics |
+| `ContinuationRejected` | zone touch failed C-tier rules | failed rule with numbers: trend state + same-side sweep age vs `SweepToMssWindow`, zone age vs `ContinuationMaxAgeBars`, or armed-model ownership (one row per zone) |
 
 Every `ZoneTouch` is therefore classifiable post-hoc: fired / PD-vetoed /
 model-not-armed / model-expired — with the numbers to prove which. Subsequent

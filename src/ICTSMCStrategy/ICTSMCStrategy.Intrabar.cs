@@ -506,14 +506,18 @@ namespace ICTSMC
         }
 
         /// <summary>
-        /// C-tier "Non-ICT concept" continuation signal: fires on the FIRST touch
-        /// of a fresh, trend-aligned zone that the core sweep→MSS→discount model
-        /// would NOT trade — either because no setup is armed, or because the zone
-        /// sits beyond the PD limit (premium/discount continuation). Deliberately
-        /// the lowest tier: it exists so the journal measures the momentum-
-        /// continuation play with real outcomes instead of excluding it untracked.
-        /// A++/A+/B logic is untouched; when the armed model can fire from this
-        /// zone, C stays silent (no double signal).
+        /// C-tier "Non-ICT concept" signal: fires on the FIRST touch of a fresh
+        /// zone that the core sweep→MSS→discount model would NOT trade. Two
+        /// flavors, split by ArmSource for the analytics:
+        ///  • Continuation — trend-aligned zone, no armed setup (or PD-blocked):
+        ///    the momentum-continuation play.
+        ///  • SweepRev — counter-trend, but a same-side liquidity sweep is inside
+        ///    its sweep→MSS window: the inversion-reversal entry that lives in the
+        ///    gap between the sweep and the MSS that will flip the trend
+        ///    (ContinuationAfterSweep toggle).
+        /// Every veto is journaled as ContinuationRejected with exact metrics.
+        /// Deliberately the lowest tier; A++/A+/B logic is untouched, and when the
+        /// armed model can fire from this zone, C stays silent (no double signal).
         /// </summary>
         private void TryEmitContinuationSignal(Zone zone, int bar)
         {
@@ -521,14 +525,38 @@ namespace ICTSMC
                 return;
 
             var longSide = zone.IsBullish;
+            var trendAligned = _trend == (longSide ? 1 : -1);
 
-            // Continuation only: trade strictly with the tracked structure trend.
-            if (_trend != (longSide ? 1 : -1))
+            // Counter-trend is allowed ONLY in the sweep-reversal window: a same-side
+            // liquidity sweep already happened (manipulation done) and its sweep→MSS
+            // clock is still running — the ICT inversion-reversal entry that lives
+            // between the sweep and the MSS that will officially flip the trend.
+            var sweepBar = longSide ? _pendingBullSweepBar : _pendingBearSweepBar;
+            var sweepAge = sweepBar > 0 ? bar - sweepBar : -1;
+            var sweepReversal = ContinuationAfterSweep && !trendAligned &&
+                                sweepBar > 0 && sweepAge <= SweepToMssWindow;
+
+            if (!trendAligned && !sweepReversal)
+            {
+                zone.ContinuationFired = true; // one decision row per zone
+                JournalEvent(bar, "ContinuationRejected", longSide ? "Bull" : "Bear", zone, GetCandle(bar).Close,
+                    $"not trend-aligned (trend={(_trend == 1 ? "Bull" : _trend == -1 ? "Bear" : "None")}); " +
+                    (sweepBar > 0
+                        ? $"last same-side sweep bar {sweepBar}, age {sweepAge} > window {SweepToMssWindow}"
+                        : "no same-side sweep on record") +
+                    (ContinuationAfterSweep ? "" : "; sweep-reversal disabled"));
                 return;
+            }
 
             // Fresh zones only — the concept is a newly minted imbalance in a move.
-            if (bar - zone.StartBar > ContinuationMaxAgeBars)
+            var age = bar - zone.StartBar;
+            if (age > ContinuationMaxAgeBars)
+            {
+                zone.ContinuationFired = true;
+                JournalEvent(bar, "ContinuationRejected", longSide ? "Bull" : "Bear", zone, GetCandle(bar).Close,
+                    $"zone age {age} bars > ContinuationMaxAgeBars {ContinuationMaxAgeBars}");
                 return;
+            }
 
             var range = GetDealingRange();
             decimal? eq = null;
@@ -545,13 +573,20 @@ namespace ICTSMC
 
             // The core model owns this touch — it can (or just did) fire an A/B signal.
             if (armed && pdOk)
+            {
+                zone.ContinuationFired = true;
+                JournalEvent(bar, "ContinuationRejected", longSide ? "Bull" : "Bear", zone, GetCandle(bar).Close,
+                    "armed core model owns this touch (PD-aligned) — A/B signal path");
                 return;
+            }
 
             zone.ContinuationFired = true;
 
             var reason = armed
                 ? $"PD override: zone mid {FormatPrice(zone.Mid)} beyond EQ limit"
-                : "no sweep→MSS chain";
+                : sweepReversal
+                    ? $"sweep-reversal: {(longSide ? "SSL" : "BSL")} swept {sweepAge} bars ago — awaiting MSS"
+                    : "no sweep→MSS chain";
 
             var buffer = SlBufferTicks * TickSize;
             var entry = longSide ? zone.Top : zone.Bottom;
@@ -575,7 +610,7 @@ namespace ICTSMC
                 Live = _realtime,
                 Long = longSide,
                 Tier = "C",
-                ArmSource = "Continuation",
+                ArmSource = sweepReversal ? "SweepRev" : "Continuation",
                 TriggerTag = zone.Tag,
                 TriggerType = zone.Type,
                 Layer = zone.IsHtf ? zone.HtfLabel : "LTF",
@@ -586,7 +621,7 @@ namespace ICTSMC
                 Tp2 = tp2,
                 Tp3 = tp3,
                 PdStatus = pdStatus,
-                Confluence = $"Non-ICT concept · momentum continuation · {reason}",
+                Confluence = $"Non-ICT concept · {(sweepReversal ? "sweep reversal" : "momentum continuation")} · {reason}",
                 SignalBar = bar,
                 TriggerZoneId = zone.Id
             };
@@ -597,8 +632,9 @@ namespace ICTSMC
                 return;
 
             var counterPd = pdStatus == (longSide ? "Premium" : "Discount");
-            Fire($"🟡 C-TIER {(longSide ? "LONG" : "SHORT")} — Continuation (Non-ICT)\n" +
-                 $"📍 Zone: {zone.Tag} {FormatPrice(zone.Bottom)}–{FormatPrice(zone.Top)} (fresh, {bar - zone.StartBar} bars old)\n" +
+            var flavor = sweepReversal ? "Sweep Reversal" : "Continuation";
+            Fire($"🟡 C-TIER {(longSide ? "LONG" : "SHORT")} — {flavor} (Non-ICT)\n" +
+                 $"📍 Zone: {zone.Tag} {FormatPrice(zone.Bottom)}–{FormatPrice(zone.Top)} (fresh, {age} bars old)\n" +
                  $"⚖️ Range position: {pdStatus}{(counterPd ? " — counter-PD" : "")}\n" +
                  $"ℹ️ Outside core model: {reason}\n" +
                  $"▶️ Entry: ~{FormatPrice(entry)}\n" +

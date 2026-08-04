@@ -30,8 +30,10 @@ toggle:
 
 - 🟢/🔴 **Entry model** — sweep + MSS + return to zone, tiered by confluence
   (🟢🟢🟢 A++ with Daily/Weekly zone, 🟢🟢 A+ with any HTF zone, 🟢 B standalone;
-  🟡 **C** = trend-aligned fresh-zone *continuation* touch outside the core model —
-  explicitly labeled Non-ICT, lowest tier, tracked separately in analytics),
+  🟡 **C** = fresh-zone touch outside the core model: trend-aligned *continuation*,
+  or counter-trend *sweep reversal* while a same-side sweep's MSS window is open
+  (inversion-reversal entries, `ArmSource=SweepRev`) — explicitly labeled Non-ICT,
+  lowest tier, tracked separately in analytics),
   with zone stack, PD status (Discount/Near EQ/Premium), entry, SL and 2R/3R targets
 - ❌ **Signal zone invalidated** — the FVG/iFVG/OB behind a still-open signal got
   consumed: the structural basis of the trade is gone, consider exiting/tightening

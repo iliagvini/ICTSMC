@@ -354,6 +354,9 @@ namespace ICTSMC
         [Range(1, 200)]
         public int ContinuationMaxAgeBars { get; set; } = 20;
 
+        [Display(GroupName = GrpSignal, Name = "C-tier: allow counter-trend after same-side sweep (inversion reversal)", Order = 864)]
+        public bool ContinuationAfterSweep { get; set; } = true;
+
         #endregion
 
         #region Alert settings
