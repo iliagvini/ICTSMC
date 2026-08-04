@@ -12,7 +12,7 @@
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <AssemblyName>ICTSMCStrategy</AssemblyName>
-    <RootNamespace>IctSmc</RootNamespace>
+    <RootNamespace>ICTSMC</RootNamespace>
     <!-- ATAS install folder: pass /p:AtasPath=... to override; ATAS X is probed first. -->
     <AtasPath Condition="'$(AtasPath)' == '' AND Exists('C:\Program Files\ATAS X')">C:\Program Files\ATAS X</AtasPath>
     <AtasPath Condition="'$(AtasPath)' == '' AND Exists('C:\Program Files\ATAS Platform')">C:\Program Files\ATAS Platform</AtasPath>

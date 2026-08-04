@@ -4,9 +4,9 @@ using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 
-namespace IctSmc
+namespace ICTSMC
 {
-    public partial class IctSmcZones
+    public partial class ICTSMCStrategy
     {
         private static readonly HttpClient Http = new()
         {

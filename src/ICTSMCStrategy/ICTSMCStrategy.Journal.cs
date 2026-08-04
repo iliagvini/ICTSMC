@@ -7,7 +7,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace IctSmc
+namespace ICTSMC
 {
     /// <summary>
     /// Journaling / audit pipeline.
@@ -31,7 +31,7 @@ namespace IctSmc
     /// the next recalculation. All IO is buffered and flushed off the chart thread; an
     /// IO failure can never touch trading logic.
     /// </summary>
-    public partial class IctSmcZones
+    public partial class ICTSMCStrategy
     {
         private const string GrpJournal = "11. Journal";
 
