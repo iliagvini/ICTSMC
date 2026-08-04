@@ -12,7 +12,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace IctSmc
+namespace ICTSMC
 {
     /// <summary>
     /// Telegram remote commands + self-rendered chart snapshots.
@@ -29,7 +29,7 @@ namespace IctSmc
     /// minimized or the chart sits in a background tab. Commands from chat ids
     /// that no registered chart is configured for are ignored silently.
     /// </summary>
-    public partial class IctSmcZones
+    public partial class ICTSMCStrategy
     {
         [Display(GroupName = GrpTelegram, Name = "Remote commands (/shot snapshots)", Order = 1030)]
         public bool TelegramRemoteEnabled
@@ -302,30 +302,30 @@ namespace IctSmc
     internal static class TelegramHub
     {
         private static readonly object Sync = new();
-        private static readonly List<WeakReference<IctSmcZones>> Instances = new();
+        private static readonly List<WeakReference<ICTSMCStrategy>> Instances = new();
         private static readonly Dictionary<string, Poller> Pollers = new();
 
         // Long-poll needs a client that outlives the 25s server-side hold.
         private static readonly HttpClient Client = new() { Timeout = TimeSpan.FromSeconds(40) };
 
-        public static void Register(IctSmcZones indicator)
+        public static void Register(ICTSMCStrategy indicator)
         {
             lock (Sync)
             {
                 Instances.RemoveAll(w => !w.TryGetTarget(out _));
                 if (!Instances.Any(w => w.TryGetTarget(out var t) && ReferenceEquals(t, indicator)))
-                    Instances.Add(new WeakReference<IctSmcZones>(indicator));
+                    Instances.Add(new WeakReference<ICTSMCStrategy>(indicator));
             }
 
             EnsurePollers();
         }
 
-        internal static List<IctSmcZones> Live()
+        internal static List<ICTSMCStrategy> Live()
         {
             lock (Sync)
             {
                 Instances.RemoveAll(w => !w.TryGetTarget(out _));
-                var list = new List<IctSmcZones>();
+                var list = new List<ICTSMCStrategy>();
                 foreach (var w in Instances)
                     if (w.TryGetTarget(out var t))
                         list.Add(t);
@@ -372,7 +372,7 @@ namespace IctSmc
 
             public void Stop() => _cts.Cancel();
 
-            private List<IctSmcZones> Charts() =>
+            private List<ICTSMCStrategy> Charts() =>
                 Live().Where(i => i.HubToken == _token).ToList();
 
             private async Task LoopAsync()
@@ -476,7 +476,7 @@ namespace IctSmc
                 }
             }
 
-            private void SendChartKeyboard(string chatId, List<IctSmcZones> charts)
+            private void SendChartKeyboard(string chatId, List<ICTSMCStrategy> charts)
             {
                 var buttons = charts
                     .OrderBy(c => c.HubName)

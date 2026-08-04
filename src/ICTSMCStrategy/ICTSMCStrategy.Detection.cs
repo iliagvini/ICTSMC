@@ -3,9 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using ATAS.Indicators;
 
-namespace IctSmc
+namespace ICTSMC
 {
-    public partial class IctSmcZones
+    public partial class ICTSMCStrategy
     {
         /// <summary>
         /// Runs once per finalized candle. All pattern DETECTION happens here;

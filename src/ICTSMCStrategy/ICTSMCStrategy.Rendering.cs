@@ -7,7 +7,7 @@ using ATAS.Indicators;
 using OFT.Rendering.Context;
 using OFT.Rendering.Tools;
 
-namespace IctSmc
+namespace ICTSMC
 {
     /// <summary>
     /// Live-trading rendering. Philosophy: the chart shows only what is tradeable
@@ -16,7 +16,7 @@ namespace IctSmc
     /// The full detection state lives on underneath (alerts, entry model and the
     /// journal all see everything); rendering is just the visible slice of it.
     /// </summary>
-    public partial class IctSmcZones
+    public partial class ICTSMCStrategy
     {
         private static readonly RenderFont ZoneFont = new("Segoe UI", 8f);
         private static readonly RenderFont StructureFont = new("Segoe UI", 8f, FontStyle.Bold);

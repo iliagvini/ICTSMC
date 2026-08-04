@@ -1,6 +1,6 @@
 using System;
 
-namespace IctSmc
+namespace ICTSMC
 {
     /// <summary>Kind of institutional zone drawn on the chart.</summary>
     public enum ZoneType

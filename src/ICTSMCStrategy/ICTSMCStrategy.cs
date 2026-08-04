@@ -5,7 +5,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Drawing;
 using ATAS.Indicators;
 
-namespace IctSmc
+namespace ICTSMC
 {
     /// <summary>
     /// ICT / Smart-Money-Concepts zone engine for ATAS.
@@ -23,7 +23,7 @@ namespace IctSmc
     /// </summary>
     [DisplayName("ICT/SMC Strategy")]
     [Category("Order Flow")]
-    public partial class IctSmcZones : Indicator
+    public partial class ICTSMCStrategy : Indicator
     {
         #region Group names
 
@@ -418,7 +418,7 @@ namespace IctSmc
 
         #endregion
 
-        public IctSmcZones()
+        public ICTSMCStrategy()
             : base(true)
         {
             DenyToChangePanel = true;
