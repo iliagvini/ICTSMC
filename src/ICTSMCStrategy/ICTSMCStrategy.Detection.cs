@@ -444,18 +444,17 @@ namespace ICTSMC
             setup.RangeHighBar = highBar;
             setup.RangeLowBar = lowBar;
 
-            // The only strict LTF POIs eligible immediately are zones objectively
-            // confirmed by this same displacement bar. FVGs formed in the next two
-            // completed candles are linked by AddZone while the setup remains armed.
-            foreach (var zone in _zones.Where(z => z.ConfirmedBar == evt.Bar && z.IsBullish == evt.Bullish && !z.IsHtf))
-            {
-                zone.ConfirmingStructureBar = evt.Id;
-                setup.EligiblePoiIds.Add(zone.Id);
-            }
+            // A confirmed POI survives an unarmed presentation. Link every still
+            // valid same-side zone that already exists, then let AddZone link FVGs /
+            // OBs objectively confirmed in the next two completed candles. This
+            // keeps causality intact while allowing a later qualified setup to use a
+            // previously touched-but-not-invalidated POI.
+            var linkedExisting = LinkExistingPoisToArmedSetup(setup, evt.Bar);
 
             JournalEvent(evt.Bar, "Armed", evt.Bullish ? "Bull" : "Bear", null, evt.Level,
                 $"strict setup #{setup.Id}; external MSS; trap event #{setup.LiquidityEventId}; " +
-                $"range={FormatPrice(low)}-{FormatPrice(high)}; expires at bar {setup.ExpiresBar}");
+                $"range={FormatPrice(low)}-{FormatPrice(high)}; linked existing POIs={linkedExisting}; " +
+                $"expires at bar {setup.ExpiresBar}");
         }
 
         private bool TryGetExternalDealingRange(StructureEvent evt, out decimal high, out decimal low, out int highBar, out int lowBar)
@@ -722,15 +721,39 @@ namespace ICTSMC
                 return;
             if (zone.ConfirmedBar < setup.ArmedBar || zone.ConfirmedBar > setup.ArmedBar + 2)
                 return;
-            if (zone.IsHtf && !HtfZonesAsExecutionPoi)
-                return;
-            if (!zone.IsHtf && !IsChartZoneFamilyAllowedForStrictEntry(zone))
+            if (!IsStrictPoiAvailableForCurrentPolicy(zone) ||
+                zone.EligibleFromBar > setup.ExpiresBar || !IsZoneVisibleAndEligibleForStrictEntry(zone))
                 return;
 
             zone.ConfirmingStructureBar = setup.MssStructureEventId;
-            setup.EligiblePoiIds.Add(zone.Id);
+            if (!setup.EligiblePoiIds.Add(zone.Id))
+                return;
             JournalEvent(zone.ConfirmedBar, "PoiLinked", zone.IsBullish ? "Bull" : "Bear", zone, 0m,
                 $"strict setup #{setup.Id}; external MSS #{setup.MssStructureEventId}");
+        }
+
+        private int LinkExistingPoisToArmedSetup(StrictSetup setup, int armBar)
+        {
+            var linked = 0;
+            foreach (var zone in _zones)
+            {
+                if (zone.IsBullish != setup.Long || zone.ConfirmedBar > armBar ||
+                    zone.EligibleFromBar > setup.ExpiresBar ||
+                    !IsStrictPoiAvailableForCurrentPolicy(zone) ||
+                    !IsZoneVisibleAndEligibleForStrictEntry(zone))
+                    continue;
+
+                if (!setup.EligiblePoiIds.Add(zone.Id))
+                    continue;
+
+                zone.ConfirmingStructureBar = setup.MssStructureEventId;
+                linked++;
+                JournalEvent(armBar, "PoiLinkedExisting", zone.IsBullish ? "Bull" : "Bear", zone, 0m,
+                    $"strict setup #{setup.Id}; external MSS #{setup.MssStructureEventId}; " +
+                    $"prior unarmed presentations={zone.UnarmedPresentationEpisodes}; POI retained and linked");
+            }
+
+            return linked;
         }
 
         /// <summary>
@@ -757,10 +780,11 @@ namespace ICTSMC
                     continue;
 
                 var rule = zone.IsOrderBlock ? ObMitigation : FvgMitigation;
-                if (zone.State != ZoneState.Mitigated && rule == MitigationRule.BodyClose)
+                var strictBodyClose = RetainStrictPoiThroughTouchMitigation(zone);
+                if (zone.State != ZoneState.Mitigated && (rule == MitigationRule.BodyClose || strictBodyClose))
                 {
                     if (StrictRules.IsBodyCloseInvalidated(zone.IsBullish, candle.Close, zone.Top, zone.Bottom))
-                        Mitigate(zone, bar, "BodyClose");
+                        Mitigate(zone, bar, strictBodyClose ? "Strict POI BodyClose" : "BodyClose");
                 }
 
                 // IFVG: only plain FVGs invert (an inversion never re-inverts), and only
@@ -1413,10 +1437,11 @@ namespace ICTSMC
                     continue;
 
                 var rule = zone.IsOrderBlock ? ObMitigation : FvgMitigation;
-                if (zone.State != ZoneState.Mitigated && rule == MitigationRule.BodyClose &&
+                var strictBodyClose = RetainStrictPoiThroughTouchMitigation(zone);
+                if (zone.State != ZoneState.Mitigated && (rule == MitigationRule.BodyClose || strictBodyClose) &&
                     StrictRules.IsBodyCloseInvalidated(zone.IsBullish, close, zone.Top, zone.Bottom))
                 {
-                    Mitigate(zone, confirmedChartBar, "HTF BodyClose");
+                    Mitigate(zone, confirmedChartBar, strictBodyClose ? "HTF Strict POI BodyClose" : "HTF BodyClose");
                 }
 
                 if (!IfvgEnabled || zone.Inverted ||
@@ -1484,6 +1509,7 @@ namespace ICTSMC
                 if (!StrictRules.HasOhlcIntersection(candle.High, candle.Low, zone.Top, zone.Bottom))
                     continue;
 
+                var newEpisode = zone.LastTouchedBar < 0 || bar > zone.LastTouchedBar + 1;
                 if (zone.FirstPresentationBar == null)
                 {
                     zone.FirstPresentationBar = bar;
@@ -1491,18 +1517,23 @@ namespace ICTSMC
                     zone.State = ZoneState.Touched;
                     zone.TouchEpisodes = 1;
                 }
+                else if (newEpisode)
+                {
+                    zone.TouchEpisodes++;
+                }
 
                 zone.LastTouchedBar = bar;
-                zone.CoreEntryConsumed = true;
-                var rule = zone.IsOrderBlock ? ObMitigation : FvgMitigation;
-                var reachedMid = zone.IsBullish ? candle.Low <= zone.Mid : candle.High >= zone.Mid;
-                var reachedFar = zone.IsBullish ? candle.Low <= zone.Bottom : candle.High >= zone.Top;
-                if (rule == MitigationRule.AnyTouch)
-                    Mitigate(zone, bar, "Historical HTF AnyTouch");
-                else if (rule == MitigationRule.Midline && reachedMid)
-                    Mitigate(zone, bar, "Historical HTF Midline");
-                else if (rule == MitigationRule.FullFill && reachedFar)
-                    Mitigate(zone, bar, "Historical HTF FullFill");
+                if (newEpisode && !zone.CoreEntryConsumed)
+                {
+                    zone.UnarmedPresentationEpisodes++;
+                    JournalEvent(bar, "PoiUnarmedPresentation", zone.IsBullish ? "Bull" : "Bear", zone, candle.Close,
+                        $"historical HTF presentation #{zone.UnarmedPresentationEpisodes}; POI retained; " +
+                        "only source-timeframe body-close invalidation or a qualified strict fill is terminal");
+                }
+
+                // HTF POIs are invalidated only by their own source-timeframe body
+                // close in ApplyHtfBodyCloseMitigation. A lower-timeframe historical
+                // wick/presentation must never silently consume a later strict POI.
             }
 
             zone.HistoricalReconciledThroughBar = Math.Max(zone.HistoricalReconciledThroughBar, throughBar);

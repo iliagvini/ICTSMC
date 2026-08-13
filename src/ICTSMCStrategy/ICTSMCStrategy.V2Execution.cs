@@ -229,7 +229,8 @@ namespace ICTSMC
                     match.PdRejectLogged = true;
                     JournalEvent(bar, "EntryRejected", setup.Long ? "Bull" : "Bear", match, observed,
                         $"strict PD: actual entry {FormatPrice(observed)} outside EQ tolerance; " +
-                        $"range={FormatPrice(setup.RangeLow)}-{FormatPrice(setup.RangeHigh)}");
+                        $"range={FormatPrice(setup.RangeLow)}-{FormatPrice(setup.RangeHigh)}; " +
+                        "POI retained for a later qualifying presentation");
                 }
                 return;
             }
@@ -273,13 +274,14 @@ namespace ICTSMC
                     FillStatus = SignalFillStatus.UnfilledGap,
                     DataQuality = MarketDataQuality.LiveOrderedObservations,
                     ExitPlan = BaseExitPlan,
-                    TriggerZoneId = zone.Id
+                    TriggerZoneId = zone.Id,
+                    StrictSetupId = setup.Id,
+                    PriorUnarmedPresentations = zone.UnarmedPresentationEpisodes
                 };
 
-                zone.CoreEntryConsumed = true;
                 JournalSignal(record);
                 JournalEvent(bar, "UnfilledGap", setup.Long ? "Bull" : "Bear", zone, observed,
-                    "Strict POI crossed without an observed in-zone price; setup remains available for another linked POI");
+                    "Strict POI crossed without an observed in-zone price; no fill assumed and POI retained until body-close invalidation or a qualified fill");
             }
         }
 
@@ -323,7 +325,7 @@ namespace ICTSMC
 
         private bool IsStrictPoiForSetup(Zone zone, StrictSetup setup)
         {
-            if (zone.State != ZoneState.Active || zone.CoreEntryConsumed || zone.PreConfirmationTouched)
+            if (!IsStrictPoiAvailableForCurrentPolicy(zone))
                 return false;
             if (zone.IsBullish != setup.Long || zone.EligibleFromBar > setup.ExpiresBar)
                 return false;
@@ -332,6 +334,18 @@ namespace ICTSMC
             if (!IsZoneVisibleAndEligibleForStrictEntry(zone))
                 return false;
             return true;
+        }
+
+        private bool IsStrictPoiAvailableForCurrentPolicy(Zone zone) =>
+            StrictRules.IsStrictPoiAvailable(zone.State, zone.CoreEntryConsumed, zone.PreConfirmationTouched) &&
+            (StrictPoiSurvivesUnarmedTouch || zone.State == ZoneState.Active);
+
+        private StrictSetup FindArmedStrictSetupForZone(Zone zone)
+        {
+            var setup = zone.IsBullish ? _bullStrictSetup : _bearStrictSetup;
+            return setup is { Status: SetupStatus.Armed } && setup.EligiblePoiIds.Contains(zone.Id)
+                ? setup
+                : null;
         }
 
         private bool IsChartZoneFamilyAllowedForStrictEntry(Zone zone) =>
@@ -349,6 +363,26 @@ namespace ICTSMC
             }
 
             return IsChartZoneFamilyAllowedForStrictEntry(zone);
+        }
+
+        /// <summary>
+        /// A strict POI is retained through casual wick/touch presentations. This
+        /// deliberately overrides legacy touch/mid/full-fill mitigation for the
+        /// execution lifecycle: a body close through the far boundary remains the
+        /// terminal invalidation, while a verified strict fill is the only explicit
+        /// execution consumption.
+        /// </summary>
+        private bool RetainStrictPoiThroughTouchMitigation(Zone zone)
+        {
+            if (!StrictPoiSurvivesUnarmedTouch)
+                return false;
+
+            // HTF zones already use source-timeframe body-close invalidation. Keep
+            // them out of an accidental LTF wick-based terminal state as well.
+            if (zone.IsHtf)
+                return true;
+
+            return zone.IsOrderBlock ? UseObForStrictEntry : UseFvgForStrictEntry;
         }
 
         private void EmitStrictFilledSignal(StrictSetup setup, Zone trigger, int bar, decimal entry)
@@ -404,10 +438,13 @@ namespace ICTSMC
                 DataQuality = MarketDataQuality.LiveOrderedObservations,
                 ExitPlan = BaseExitPlan,
                 RunnerStop = sl,
-                TriggerZoneId = trigger.Id
+                TriggerZoneId = trigger.Id,
+                StrictSetupId = setup.Id,
+                PriorUnarmedPresentations = trigger.UnarmedPresentationEpisodes
             };
 
             trigger.CoreEntryConsumed = true;
+            trigger.ConsumedByStrictSetupId = setup.Id;
             setup.Status = SetupStatus.Consumed;
             JournalSignal(record);
 
@@ -453,10 +490,12 @@ namespace ICTSMC
                 FillStatus = SignalFillStatus.AmbiguousOhlc,
                 DataQuality = MarketDataQuality.OhlcApproximation,
                 ExitPlan = BaseExitPlan,
-                TriggerZoneId = trigger.Id
+                TriggerZoneId = trigger.Id,
+                StrictSetupId = setup.Id,
+                PriorUnarmedPresentations = trigger.UnarmedPresentationEpisodes
             };
 
-            trigger.CoreEntryConsumed = true;
+            trigger.LastAmbiguousStrictAttemptBar = bar;
             setup.Status = SetupStatus.Consumed;
             JournalSignal(record);
             JournalEvent(bar, "AmbiguousOhlcSignal", setup.Long ? "Bull" : "Bear", trigger, entry,
@@ -491,8 +530,11 @@ namespace ICTSMC
                 else if (newEpisode)
                 {
                     zone.TouchEpisodes++;
+                    var consumption = zone.CoreEntryConsumed
+                        ? $"strict POI consumed by qualified setup #{zone.ConsumedByStrictSetupId?.ToString() ?? "?"}"
+                        : "no prior qualified strict fill; POI remains eligible";
                     JournalEvent(bar, "ZoneRetouch", zone.IsBullish ? "Bull" : "Bear", zone, observedPrice,
-                        $"touch #{zone.TouchEpisodes}; strict entry remains consumed");
+                        $"touch #{zone.TouchEpisodes}; {consumption}");
                 }
 
                 if (!zone.TouchLogged)
@@ -501,6 +543,20 @@ namespace ICTSMC
                     JournalEvent(bar, contact.Kind == ZoneContactKind.GapThrough ? "ZoneGapThrough" : "ZoneTouch",
                         zone.IsBullish ? "Bull" : "Bear", zone, observedPrice,
                         isOhlc ? "OHLC presentation; execution not assumed" : contact.Kind.ToString());
+                }
+
+                // A previously touched POI remains a candidate until a strict fill
+                // actually consumes it or a candle body invalidates it. Record each
+                // distinct unarmed presentation so later signal/outcome analysis can
+                // separate fresh-zone results from retained-POI results.
+                var armedForZone = FindArmedStrictSetupForZone(zone);
+                var ambiguousAttemptThisBar = isOhlc && zone.LastAmbiguousStrictAttemptBar == bar;
+                if (newEpisode && !zone.CoreEntryConsumed && armedForZone == null && !ambiguousAttemptThisBar)
+                {
+                    zone.UnarmedPresentationEpisodes++;
+                    JournalEvent(bar, "PoiUnarmedPresentation", zone.IsBullish ? "Bull" : "Bear", zone, observedPrice,
+                        $"presentation #{zone.UnarmedPresentationEpisodes}; no linked armed strict setup; " +
+                        "POI retained until body-close invalidation or a qualified strict fill");
                 }
 
                 if (!zone.TouchAlerted && AlertOnZoneTouch)
@@ -521,7 +577,7 @@ namespace ICTSMC
                 }
 
                 var rule = zone.IsOrderBlock ? ObMitigation : FvgMitigation;
-                if (rule == MitigationRule.BodyClose)
+                if (rule == MitigationRule.BodyClose || RetainStrictPoiThroughTouchMitigation(zone))
                     continue;
 
                 var high = ohlcHigh ?? observedPrice;
@@ -610,7 +666,8 @@ namespace ICTSMC
             };
 
             zone.ContinuationFired = true;
-            zone.CoreEntryConsumed = true;
+            // C-tier is explicitly non-ICT experimentation. It must not spend a
+            // POI that a later qualified strict setup may legitimately use.
             JournalSignal(record);
             JournalEvent(bar, "ExperimentalContinuationFilled", longSide ? "Bull" : "Bear", zone, entry,
                 $"{source}; explicitly non-ICT C tier");

@@ -83,7 +83,7 @@ namespace ICTSMC
         private const string EventsHeader =
             "Time,Mode,Instrument,Event,Direction,ZoneId,ZoneTag,Layer,Top,Bottom,Price,Extra";
         private const string SignalsHeader =
-            "SignalId,Time,Mode,Instrument,Direction,Tier,ArmSource,TriggerTag,Layer,ZoneTop,ZoneBottom,PlannedEntry,FillPrice,SL,TP2,TP3,FillStatus,DataQuality,FillBar,FillSequence,ExitPlan,PdStatus,Confluence";
+            "SignalId,Time,Mode,Instrument,Direction,Tier,ArmSource,TriggerTag,TriggerZoneId,StrictSetupId,Layer,ZoneTop,ZoneBottom,PlannedEntry,FillPrice,SL,TP2,TP3,FillStatus,DataQuality,FillBar,FillSequence,ExitPlan,PdStatus,PriorUnarmedPresentations,Confluence";
         private const string OutcomesHeader =
             "SignalId,ResolvedTime,Mode,Outcome,ExitPrice,RealizedR,MAE_R,MFE_R,BarsHeld,Direction,Tier,ArmSource,TriggerTag,Layer,FillStatus,DataQuality,ExitPlan";
 
@@ -277,6 +277,8 @@ namespace ICTSMC
                 record.Tier,
                 record.ArmSource,
                 Csv(record.TriggerTag),
+                record.TriggerZoneId.ToString(CultureInfo.InvariantCulture),
+                record.StrictSetupId.ToString(CultureInfo.InvariantCulture),
                 Csv(record.Layer),
                 Num(record.ZoneTop),
                 Num(record.ZoneBottom),
@@ -291,6 +293,7 @@ namespace ICTSMC
                 record.FillSequence.ToString(CultureInfo.InvariantCulture),
                 record.ExitPlan.ToString(),
                 record.PdStatus,
+                record.PriorUnarmedPresentations.ToString(CultureInfo.InvariantCulture),
                 Csv(record.Confluence));
 
             JournalWrite("signals.csv", SignalsHeader, line);
@@ -578,6 +581,8 @@ namespace ICTSMC
             AppendGroup(sb, strict, "Strict.ArmSource", s => s.ArmSource);
             AppendGroup(sb, strict, "Strict.Tier", s => s.Tier);
             AppendGroup(sb, strict, "Strict.Direction", s => s.Long ? "Long" : "Short");
+            AppendGroup(sb, strict, "Strict.PoiPresentation", s =>
+                s.PriorUnarmedPresentations > 0 ? "RetainedAfterUnarmedPresentation" : "FreshAtFirstPresentation");
             AppendGroup(sb, strict, "Strict.ALL", _ => "ALL");
             AppendGroup(sb, experimental, "Experimental.ZoneFamily", s => s.ZoneFamily);
             AppendGroup(sb, experimental, "Experimental.ArmSource", s => s.ArmSource);

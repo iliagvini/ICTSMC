@@ -185,7 +185,7 @@ namespace ICTSMC
         public decimal MinFvgAtrFraction { get; set; } = 0.15m;
 
         [Display(GroupName = GrpFvg, Name = "Mitigation rule", Order = 330)]
-        public MitigationRule FvgMitigation { get; set; } = MitigationRule.FullFill;
+        public MitigationRule FvgMitigation { get; set; } = MitigationRule.BodyClose;
 
         [Display(GroupName = GrpFvg, Name = "Inversion FVGs (IFVG)", Order = 335)]
         public bool IfvgEnabled { get; set; } = true;
@@ -435,6 +435,9 @@ namespace ICTSMC
 
         [Display(GroupName = GrpSignal, Name = "Require confirmed external dealing range", Order = 843)]
         public bool RequireConfirmedRangeForEntry { get; set; } = true;
+
+        [Display(GroupName = GrpSignal, Name = "Keep strict POIs after unarmed touches (body-close invalidation)", Order = 844)]
+        public bool StrictPoiSurvivesUnarmedTouch { get; set; } = true;
 
         [Display(GroupName = GrpSignal, Name = "Opposite MSS cancels armed setup", Order = 845)]
         public bool CancelOnOppositeMss { get; set; } = true;

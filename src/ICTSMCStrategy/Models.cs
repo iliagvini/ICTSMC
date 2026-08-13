@@ -171,8 +171,21 @@ namespace ICTSMC
         public DateTime? FirstPresentationTime;
         /// <summary>Last historical chart bar reconciled after late HTF construction.</summary>
         public int HistoricalReconciledThroughBar = -1;
-        /// <summary>One strict execution attempt per zone; retests remain informational.</summary>
+        /// <summary>
+        /// Set only after an ordered, qualified strict fill from this POI. A casual
+        /// presentation before a setup arms is deliberately not consumption: the
+        /// zone can still be linked to a later trap + external-MSS setup.
+        /// </summary>
         public bool CoreEntryConsumed;
+        /// <summary>Strict setup that produced the consuming fill, if any.</summary>
+        public int? ConsumedByStrictSetupId;
+        /// <summary>
+        /// Number of distinct post-confirmation presentations made while no linked
+        /// strict setup was armed. This is audit metadata, not a validity veto.
+        /// </summary>
+        public int UnarmedPresentationEpisodes;
+        /// <summary>Last bar on which an OHLC-only strict candidate was recorded.</summary>
+        public int? LastAmbiguousStrictAttemptBar;
         /// <summary>Price contacted the source before it was valid as a tradeable POI.</summary>
         public bool PreConfirmationTouched;
         public string MitigationReason = "";
@@ -294,6 +307,13 @@ namespace ICTSMC
         public decimal Tp3;
         public string PdStatus = "";
         public string Confluence = "";
+        /// <summary>Strict setup responsible for this signal (0 for non-strict records).</summary>
+        public int StrictSetupId;
+        /// <summary>
+        /// Distinct unarmed presentations that preceded this signal. Allows the
+        /// journal to measure whether retained, previously-touched POIs add value.
+        /// </summary>
+        public int PriorUnarmedPresentations;
         public int SignalBar;
         public int FillBar;
         public long FillSequence;

@@ -91,6 +91,15 @@ namespace ICTSMC
         public static bool IsBodyCloseInvalidated(bool bullish, decimal close, decimal top, decimal bottom) =>
             bullish ? close < bottom : close > top;
 
+        /// <summary>
+        /// Presentation state is not execution consumption. A confirmed POI remains
+        /// eligible after one or more unarmed touches; only a confirmed invalidation,
+        /// a prior qualified strict fill, or a pre-confirmation touch may veto it.
+        /// </summary>
+        public static bool IsStrictPoiAvailable(ZoneState state, bool coreEntryConsumed,
+            bool preConfirmationTouched) =>
+            state != ZoneState.Mitigated && !coreEntryConsumed && !preConfirmationTouched;
+
         public static bool IntervalsOverlap(decimal topA, decimal bottomA, decimal topB, decimal bottomB) =>
             topA >= bottomB && bottomA <= topB;
 

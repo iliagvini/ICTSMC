@@ -9,6 +9,7 @@ var tests = new (string Name, Action Run)[]
     ("Observed zone contact detects expected-side entry", ExpectedSideEntryIsDetected),
     ("OHLC interval requires real price overlap", OhlcIntersectionIsGeometric),
     ("BodyClose uses close rather than body extrema", BodyCloseUsesClose),
+    ("Unarmed zone presentation does not consume a strict POI", UnarmedPresentationRetainsPoi),
     ("Premium/discount validates actual entry", PremiumDiscountUsesEntry),
     ("OHLC ambiguity is explicitly recognized", OhlcAmbiguityIsRecognized)
 };
@@ -82,6 +83,20 @@ static void BodyCloseUsesClose()
     True(StrictRules.IsBodyCloseInvalidated(true, 99.75m, 102m, 100m));
     False(StrictRules.IsBodyCloseInvalidated(false, 101.50m, 102m, 100m));
     True(StrictRules.IsBodyCloseInvalidated(false, 102.25m, 102m, 100m));
+}
+
+static void UnarmedPresentationRetainsPoi()
+{
+    // A visual/presentation state is audit information, not a validity veto. A
+    // later trap + external-MSS setup may link this FVG/OB and use it once.
+    True(StrictRules.IsStrictPoiAvailable(ZoneState.Active, false, false));
+    True(StrictRules.IsStrictPoiAvailable(ZoneState.Touched, false, false));
+
+    // Only terminal invalidation, a real qualified fill, or a source touched
+    // before it was objectively valid may veto the strict POI.
+    False(StrictRules.IsStrictPoiAvailable(ZoneState.Mitigated, false, false));
+    False(StrictRules.IsStrictPoiAvailable(ZoneState.Touched, true, false));
+    False(StrictRules.IsStrictPoiAvailable(ZoneState.Touched, false, true));
 }
 
 static void PremiumDiscountUsesEntry()
