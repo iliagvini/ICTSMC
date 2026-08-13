@@ -11,18 +11,21 @@ namespace ICTSMC
         /// Runs once per finalized candle. All pattern DETECTION happens here;
         /// touch/sweep/mitigation REACTION happens intrabar in ProcessIntrabar.
         /// </summary>
-        private void OnBarComplete(int bar)
+        private void OnBarComplete(int bar, int nextBar)
         {
             if (bar < 1)
                 return;
 
             UpdateAtr(bar);
             ConfirmSwings(bar);
+            ConfirmExternalSwings(bar);
+            FinalizeLiquidityEvents(bar);
             DetectStructureBreak(bar);
+            DetectExternalStructureBreak(bar);
             UpdateLegExtreme(bar);
             DetectFvg(bar);
             ApplyBodyCloseMitigation(bar);
-            UpdateHtf(bar);
+            UpdateHtf(bar, nextBar);
             UpdateOpenSignals(bar);
             CheckOpenSignalThreats(bar);
             Prune(bar);
@@ -123,6 +126,7 @@ namespace ICTSMC
 
             _liquidity.Add(new LiquidityLevel
             {
+                Id = ++_nextLiquidityId,
                 Price = swing.Price,
                 StartBar = swing.Bar,
                 BuySide = buySide
@@ -136,6 +140,133 @@ namespace ICTSMC
             foreach (var stale in side.Skip(MaxLiquidityPerSide))
                 _liquidity.Remove(stale);
         }
+
+        /// <summary>
+        /// External swings are intentionally slower than the visual/internal swing
+        /// layer. Only breaks of these protected levels may arm the strict model.
+        /// The existing internal layer remains intact for the familiar chart labels.
+        /// </summary>
+        private void ConfirmExternalSwings(int bar)
+        {
+            var p = bar - ExternalSwingPeriod;
+            if (p < ExternalSwingPeriod)
+                return;
+
+            var pivot = GetCandle(p);
+            var isHigh = true;
+            var isLow = true;
+
+            for (var j = p - ExternalSwingPeriod; j <= p + ExternalSwingPeriod; j++)
+            {
+                if (j == p)
+                    continue;
+
+                var c = GetCandle(j);
+                if (c.High > pivot.High)
+                    isHigh = false;
+                if (c.Low < pivot.Low)
+                    isLow = false;
+                if (!isHigh && !isLow)
+                    return;
+            }
+
+            if (isHigh && (_externalSwingHighs.Count == 0 || _externalSwingHighs[^1].Bar != p))
+            {
+                var swing = new SwingPoint { Bar = p, Price = pivot.High };
+                _externalSwingHighs.Add(swing);
+                _lastExternalSwingHigh = swing;
+            }
+
+            if (isLow && (_externalSwingLows.Count == 0 || _externalSwingLows[^1].Bar != p))
+            {
+                var swing = new SwingPoint { Bar = p, Price = pivot.Low };
+                _externalSwingLows.Add(swing);
+                _lastExternalSwingLow = swing;
+            }
+        }
+
+        /// <summary>
+        /// A wick through liquidity is only an observation. The completed candle
+        /// decides whether it reclaimed the level (trap) or accepted beyond it
+        /// (run); runs can never arm a strict reversal setup.
+        /// </summary>
+        private void FinalizeLiquidityEvents(int bar)
+        {
+            var candle = GetCandle(bar);
+
+            foreach (var evt in _liquidityEvents.Where(e =>
+                         e.Disposition == LiquidityDisposition.TakenPendingClose && e.TakenBar == bar).ToList())
+            {
+                var level = _liquidity.FirstOrDefault(l => l.Id == evt.LiquidityLevelId);
+                if (level == null)
+                {
+                    evt.Disposition = LiquidityDisposition.Indeterminate;
+                    evt.ClassifiedBar = bar;
+                    continue;
+                }
+
+                evt.MaximumPenetration = evt.BuySide
+                    ? Math.Max(0m, candle.High - evt.Level)
+                    : Math.Max(0m, evt.Level - candle.Low);
+                evt.Disposition = StrictRules.ClassifyLiquidity(evt.BuySide, candle.High, candle.Low, candle.Close,
+                    evt.Level, TickSize, MinimumSweepPenetrationTicks, SweepReclaimTicks);
+                evt.ClassifiedBar = bar;
+                level.WasTrap = evt.Disposition == LiquidityDisposition.ConfirmedTrap
+                    ? true
+                    : evt.Disposition == LiquidityDisposition.Run ? false : null;
+
+                var kind = evt.Disposition switch
+                {
+                    LiquidityDisposition.ConfirmedTrap => "Trap",
+                    LiquidityDisposition.Run => "Run",
+                    _ => "Indeterminate"
+                };
+                JournalEvent(bar, "LiquidityClassified", evt.BuySide ? "BuySide" : "SellSide", null, evt.Level,
+                    $"{kind}; penetration={FormatPrice(evt.MaximumPenetration)}; close={FormatPrice(candle.Close)}; " +
+                    $"reclaim={SweepReclaimTicks} ticks");
+
+                if (evt.Disposition == LiquidityDisposition.ConfirmedTrap)
+                    CreateAwaitingStrictSetup(evt, bar);
+            }
+        }
+
+        private void CreateAwaitingStrictSetup(LiquidityEvent evt, int bar)
+        {
+            var existing = evt.LongSetup ? _bullStrictSetup : _bearStrictSetup;
+            if (existing is { Status: SetupStatus.AwaitingMss or SetupStatus.Armed })
+            {
+                existing.Status = SetupStatus.Invalidated;
+                existing.InvalidationReason = "Superseded by newer confirmed liquidity trap";
+                JournalEvent(bar, "SetupInvalidated", existing.Long ? "Bull" : "Bear", null, evt.Level,
+                    $"setup #{existing.Id} superseded by confirmed trap event #{evt.Id}");
+            }
+
+            var setup = new StrictSetup
+            {
+                Id = ++_nextStrictSetupId,
+                Long = evt.LongSetup,
+                LiquidityEventId = evt.Id,
+                CreatedBar = bar,
+                ArmedBar = -1,
+                ExpiresBar = bar + SweepToMssWindow,
+                Status = SetupStatus.AwaitingMss
+            };
+
+            if (setup.Long)
+                _bullStrictSetup = setup;
+            else
+                _bearStrictSetup = setup;
+
+            JournalEvent(bar, "SetupAwaitingMSS", setup.Long ? "Bull" : "Bear", null, evt.Level,
+                $"setup #{setup.Id}; trap event #{evt.Id}; expires at bar {setup.ExpiresBar}");
+        }
+
+        private LiquidityEvent FindLatestConfirmedTrap(bool longSide, int bar) =>
+            _liquidityEvents.Where(e => e.LongSetup == longSide &&
+                                        e.Disposition == LiquidityDisposition.ConfirmedTrap &&
+                                        bar - e.TakenBar <= SweepToMssWindow)
+                            .OrderByDescending(e => e.TakenBar)
+                            .FirstOrDefault();
 
         #endregion
 
@@ -153,17 +284,19 @@ namespace ICTSMC
 
                 var evt = new StructureEvent
                 {
+                    Id = ++_nextStructureEventId,
                     Bar = bar,
                     FromBar = _lastSwingHigh.Bar,
                     Level = _lastSwingHigh.Price,
                     Bullish = true,
-                    IsMss = isMss
+                    IsMss = isMss,
+                    Scope = StructureScope.Internal
                 };
                 _structure.Add(evt);
                 AnchorLeg(evt);
                 OnStructureEvent(evt);
 
-                if (ShowOb)
+                if (DetectLtfOb)
                     CreateOrderBlock(bar, bullish: true);
             }
 
@@ -175,19 +308,180 @@ namespace ICTSMC
 
                 var evt = new StructureEvent
                 {
+                    Id = ++_nextStructureEventId,
                     Bar = bar,
                     FromBar = _lastSwingLow.Bar,
                     Level = _lastSwingLow.Price,
                     Bullish = false,
-                    IsMss = isMss
+                    IsMss = isMss,
+                    Scope = StructureScope.Internal
                 };
                 _structure.Add(evt);
                 AnchorLeg(evt);
                 OnStructureEvent(evt);
 
-                if (ShowOb)
+                if (DetectLtfOb)
                     CreateOrderBlock(bar, bullish: false);
             }
+        }
+
+        /// <summary>
+        /// Strict entries use a second, slower structure layer. Internal labels keep
+        /// their V1 chart role, while an external displaced break of a protected
+        /// swing is the only event allowed to arm a strict reversal setup.
+        /// </summary>
+        private void DetectExternalStructureBreak(int bar)
+        {
+            var candle = GetCandle(bar);
+            var buffer = ExternalBreakBufferTicks * TickSize;
+            var displaced = _atr <= 0m || candle.High - candle.Low >= _atr * DisplacementAtrFactor;
+            if (!displaced)
+                return;
+
+            if (_lastExternalSwingHigh is { Broken: false } && candle.Close > _lastExternalSwingHigh.Price + buffer)
+            {
+                _lastExternalSwingHigh.Broken = true;
+                var evt = new StructureEvent
+                {
+                    Id = ++_nextStructureEventId,
+                    Bar = bar,
+                    FromBar = _lastExternalSwingHigh.Bar,
+                    Level = _lastExternalSwingHigh.Price,
+                    Bullish = true,
+                    IsMss = _externalTrend == -1,
+                    Scope = StructureScope.External
+                };
+                _externalTrend = 1;
+                _externalStructure.Add(evt);
+                OnExternalStructureEvent(evt);
+            }
+
+            if (_lastExternalSwingLow is { Broken: false } && candle.Close < _lastExternalSwingLow.Price - buffer)
+            {
+                _lastExternalSwingLow.Broken = true;
+                var evt = new StructureEvent
+                {
+                    Id = ++_nextStructureEventId,
+                    Bar = bar,
+                    FromBar = _lastExternalSwingLow.Bar,
+                    Level = _lastExternalSwingLow.Price,
+                    Bullish = false,
+                    IsMss = _externalTrend == 1,
+                    Scope = StructureScope.External
+                };
+                _externalTrend = -1;
+                _externalStructure.Add(evt);
+                OnExternalStructureEvent(evt);
+            }
+        }
+
+        private void OnExternalStructureEvent(StructureEvent evt)
+        {
+            JournalEvent(evt.Bar, evt.IsMss ? "ExternalMSS" : "ExternalBoS",
+                evt.Bullish ? "Bull" : "Bear", null, evt.Level,
+                $"protected swing from bar {evt.FromBar}; displacement-qualified");
+
+            var opposite = evt.Bullish ? _bearStrictSetup : _bullStrictSetup;
+            if (CancelOnOppositeMss && evt.IsMss && opposite is { Status: SetupStatus.AwaitingMss or SetupStatus.Armed })
+            {
+                opposite.Status = SetupStatus.Invalidated;
+                opposite.InvalidationReason = "Opposite external structure break";
+                JournalEvent(evt.Bar, "SetupInvalidated", opposite.Long ? "Bull" : "Bear", null, evt.Level,
+                    $"setup #{opposite.Id}; opposite external {(evt.IsMss ? "MSS" : "BoS")}");
+            }
+
+            if (!EntryModelEnabled || !evt.IsMss)
+                return;
+
+            var setup = evt.Bullish ? _bullStrictSetup : _bearStrictSetup;
+            var trap = FindLatestConfirmedTrap(evt.Bullish, evt.Bar);
+            if (RequireSweepForEntry && (setup == null || setup.Status != SetupStatus.AwaitingMss || trap == null))
+            {
+                JournalEvent(evt.Bar, "ArmRejected", evt.Bullish ? "Bull" : "Bear", null, evt.Level,
+                    "Strict model requires a still-valid confirmed liquidity trap before external MSS");
+                return;
+            }
+
+            if (setup == null || setup.Status != SetupStatus.AwaitingMss)
+            {
+                setup = new StrictSetup
+                {
+                    Id = ++_nextStrictSetupId,
+                    Long = evt.Bullish,
+                    LiquidityEventId = trap?.Id ?? 0,
+                    CreatedBar = evt.Bar,
+                    Status = SetupStatus.AwaitingMss
+                };
+                if (setup.Long) _bullStrictSetup = setup; else _bearStrictSetup = setup;
+            }
+
+            if (!TryGetExternalDealingRange(evt, out var high, out var low, out var highBar, out var lowBar))
+            {
+                if (RequireConfirmedRangeForEntry)
+                {
+                    setup.Status = SetupStatus.Invalidated;
+                    setup.InvalidationReason = "No confirmed external dealing range";
+                    JournalEvent(evt.Bar, "ArmRejected", evt.Bullish ? "Bull" : "Bear", null, evt.Level,
+                        "Strict model requires a confirmed external dealing range");
+                    return;
+                }
+
+                // Relaxed mode remains explicit: use the current displaced candle
+                // rather than quietly accepting a missing/unbounded range.
+                var candle = GetCandle(evt.Bar);
+                high = candle.High;
+                low = candle.Low;
+                highBar = evt.Bar;
+                lowBar = evt.Bar;
+            }
+
+            setup.Status = SetupStatus.Armed;
+            setup.ArmedBar = evt.Bar;
+            setup.ExpiresBar = evt.Bar + ArmWindowBars;
+            setup.MssStructureEventId = evt.Id;
+            setup.RangeHigh = high;
+            setup.RangeLow = low;
+            setup.RangeHighBar = highBar;
+            setup.RangeLowBar = lowBar;
+
+            // The only strict LTF POIs eligible immediately are zones objectively
+            // confirmed by this same displacement bar. FVGs formed in the next two
+            // completed candles are linked by AddZone while the setup remains armed.
+            foreach (var zone in _zones.Where(z => z.ConfirmedBar == evt.Bar && z.IsBullish == evt.Bullish && !z.IsHtf))
+            {
+                zone.ConfirmingStructureBar = evt.Id;
+                setup.EligiblePoiIds.Add(zone.Id);
+            }
+
+            JournalEvent(evt.Bar, "Armed", evt.Bullish ? "Bull" : "Bear", null, evt.Level,
+                $"strict setup #{setup.Id}; external MSS; trap event #{setup.LiquidityEventId}; " +
+                $"range={FormatPrice(low)}-{FormatPrice(high)}; expires at bar {setup.ExpiresBar}");
+        }
+
+        private bool TryGetExternalDealingRange(StructureEvent evt, out decimal high, out decimal low, out int highBar, out int lowBar)
+        {
+            high = 0m;
+            low = 0m;
+            highBar = 0;
+            lowBar = 0;
+
+            var anchor = evt.Bullish ? _lastExternalSwingLow : _lastExternalSwingHigh;
+            if (anchor == null || anchor.Bar >= evt.Bar)
+                return false;
+
+            high = GetCandle(anchor.Bar).High;
+            low = GetCandle(anchor.Bar).Low;
+            highBar = anchor.Bar;
+            lowBar = anchor.Bar;
+
+            for (var i = anchor.Bar; i <= evt.Bar; i++)
+            {
+                var candle = GetCandle(i);
+                if (candle.High >= high) { high = candle.High; highBar = i; }
+                if (candle.Low <= low) { low = candle.Low; lowBar = i; }
+            }
+
+            return high > low;
         }
 
         /// <summary>
@@ -318,6 +612,8 @@ namespace ICTSMC
                 {
                     Type = bullish ? ZoneType.BullOrderBlock : ZoneType.BearOrderBlock,
                     StartBar = i,
+                    ConfirmedBar = breakBar,
+                    EligibleFromBar = breakBar + 1,
                     Top = top,
                     Bottom = bottom
                 });
@@ -336,7 +632,7 @@ namespace ICTSMC
         /// </summary>
         private void DetectFvg(int bar)
         {
-            if (!ShowFvg || bar < 2)
+            if (!DetectLtfFvg || bar < 2)
                 return;
 
             var c0 = GetCandle(bar - 2);
@@ -350,6 +646,8 @@ namespace ICTSMC
                 {
                     Type = ZoneType.BullFvg,
                     StartBar = bar - 1,
+                    ConfirmedBar = bar,
+                    EligibleFromBar = bar + 1,
                     Top = c2.Low,
                     Bottom = c0.High
                 });
@@ -360,6 +658,8 @@ namespace ICTSMC
                 {
                     Type = ZoneType.BearFvg,
                     StartBar = bar - 1,
+                    ConfirmedBar = bar,
+                    EligibleFromBar = bar + 1,
                     Top = c0.Low,
                     Bottom = c2.High
                 });
@@ -370,32 +670,67 @@ namespace ICTSMC
 
         #region Zone bookkeeping
 
-        private void AddZone(Zone zone)
+        private Zone AddZone(Zone zone)
         {
+            if (zone.ConfirmedBar <= 0)
+                zone.ConfirmedBar = zone.StartBar;
+            if (zone.EligibleFromBar <= 0)
+                zone.EligibleFromBar = zone.ConfirmedBar + 1;
+
             // Skip duplicates: an active zone of the same type covering the same territory.
-            var overlaps = _zones.Any(z =>
+            var existing = _zones.FirstOrDefault(z =>
                 z.State != ZoneState.Mitigated &&
                 z.Type == zone.Type &&
                 z.IsHtf == zone.IsHtf &&
                 z.HtfLabel == zone.HtfLabel &&
                 zone.Top >= z.Bottom && zone.Bottom <= z.Top);
 
-            if (overlaps)
-                return;
+            if (existing != null)
+            {
+                // A later objective confirmation can only improve the existing
+                // decision metadata; geometry and visual origin remain untouched.
+                existing.ConfirmedBar = Math.Min(existing.ConfirmedBar, zone.ConfirmedBar);
+                existing.EligibleFromBar = Math.Min(existing.EligibleFromBar, zone.EligibleFromBar);
+                LinkZoneToArmedSetup(existing);
+                return existing;
+            }
 
             zone.Id = ++_nextZoneId;
             _zones.Add(zone);
             OnZoneCreated(zone);
-            JournalEvent(_lastSeenBar, "ZoneCreated", zone.IsBullish ? "Bull" : "Bear", zone, 0m, "");
+            JournalEvent(zone.ConfirmedBar, "ZoneCreated", zone.IsBullish ? "Bull" : "Bear", zone, 0m,
+                $"origin bar {zone.StartBar}; eligible from bar {zone.EligibleFromBar}");
 
-            var sameType = _zones.Where(z => z.Type == zone.Type && z.IsHtf == zone.IsHtf &&
-                                             z.HtfLabel == zone.HtfLabel && z.State != ZoneState.Mitigated)
-                                 .OrderByDescending(z => z.StartBar)
-                                 .ToList();
+            var sameType = (zone.IsHtf
+                    ? _zones.Where(z => z.IsHtf && z.HtfLabel == zone.HtfLabel && z.State != ZoneState.Mitigated)
+                    : _zones.Where(z => z.Type == zone.Type && !z.IsHtf && z.State != ZoneState.Mitigated))
+                .OrderByDescending(z => z.ConfirmedBar)
+                .ToList();
 
             var cap = zone.IsHtf ? MaxHtfZones : MaxZonesPerType;
             foreach (var stale in sameType.Skip(cap))
                 _zones.Remove(stale);
+
+            LinkZoneToArmedSetup(zone);
+            return zone;
+        }
+
+        private void LinkZoneToArmedSetup(Zone zone)
+        {
+            var setup = zone.IsBullish ? _bullStrictSetup : _bearStrictSetup;
+            if (setup is not { Status: SetupStatus.Armed })
+                return;
+            if (zone.ConfirmedBar < setup.ArmedBar || zone.ConfirmedBar > setup.ArmedBar + 2)
+                return;
+            if (zone.IsHtf && !HtfZonesAsExecutionPoi)
+                return;
+            if (!zone.IsHtf && !IsChartZoneFamilyAllowedForStrictEntry(zone))
+                return;
+
+            zone.ConfirmingStructureBar = setup.MssStructureEventId;
+            setup.EligiblePoiIds.Add(zone.Id);
+            JournalEvent(zone.ConfirmedBar, "PoiLinked", zone.IsBullish ? "Bull" : "Bear", zone, 0m,
+                $"strict setup #{setup.Id}; external MSS #{setup.MssStructureEventId}");
         }
 
         /// <summary>
@@ -408,23 +743,24 @@ namespace ICTSMC
         private void ApplyBodyCloseMitigation(int bar)
         {
             var candle = GetCandle(bar);
-            var bodyLow = Math.Min(candle.Open, candle.Close);
-            var bodyHigh = Math.Max(candle.Open, candle.Close);
-
             var inversions = new List<Zone>();
 
             foreach (var zone in _zones)
             {
-                if (zone.StartBar >= bar)
+                if (zone.ConfirmedBar >= bar)
+                    continue;
+
+                // HTF BodyClose and IFVG conversion are evaluated only on the
+                // source timeframe in OnHtfCandleClosed. LTF touch rules may still
+                // mitigate an HTF POI intrabar when explicitly selected.
+                if (zone.IsHtf)
                     continue;
 
                 var rule = zone.IsOrderBlock ? ObMitigation : FvgMitigation;
                 if (zone.State != ZoneState.Mitigated && rule == MitigationRule.BodyClose)
                 {
-                    if (zone.IsBullish && bodyLow < zone.Bottom)
-                        Mitigate(zone, bar);
-                    else if (!zone.IsBullish && bodyHigh > zone.Top)
-                        Mitigate(zone, bar);
+                    if (StrictRules.IsBodyCloseInvalidated(zone.IsBullish, candle.Close, zone.Top, zone.Bottom))
+                        Mitigate(zone, bar, "BodyClose");
                 }
 
                 // IFVG: only plain FVGs invert (an inversion never re-inverts), and only
@@ -434,11 +770,11 @@ namespace ICTSMC
                     zone.Type is ZoneType.BullFvg or ZoneType.BearFvg &&
                     (zone.State != ZoneState.Mitigated || (zone.EndBar.HasValue && bar - zone.EndBar.Value <= 3)))
                 {
-                    if (zone.Type == ZoneType.BullFvg && bodyLow < zone.Bottom)
+                    if (zone.Type == ZoneType.BullFvg && StrictRules.IsBodyCloseInvalidated(true, candle.Close, zone.Top, zone.Bottom))
                     {
                         zone.Inverted = true;
                         if (zone.State != ZoneState.Mitigated)
-                            Mitigate(zone, bar);
+                            Mitigate(zone, bar, "IFVG body-close conversion");
 
                         inversions.Add(new Zone
                         {
@@ -447,15 +783,17 @@ namespace ICTSMC
                             HtfLabel = zone.HtfLabel,
                             HtfMinutes = zone.HtfMinutes,
                             StartBar = bar,
+                            ConfirmedBar = bar,
+                            EligibleFromBar = bar + 1,
                             Top = zone.Top,
                             Bottom = zone.Bottom
                         });
                     }
-                    else if (zone.Type == ZoneType.BearFvg && bodyHigh > zone.Top)
+                    else if (zone.Type == ZoneType.BearFvg && StrictRules.IsBodyCloseInvalidated(false, candle.Close, zone.Top, zone.Bottom))
                     {
                         zone.Inverted = true;
                         if (zone.State != ZoneState.Mitigated)
-                            Mitigate(zone, bar);
+                            Mitigate(zone, bar, "IFVG body-close conversion");
 
                         inversions.Add(new Zone
                         {
@@ -478,26 +816,28 @@ namespace ICTSMC
                     "FVG flipped polarity (body close through)");
             }
 
-            // Classify finished sweeps: close back inside = trap, close through = run.
-            foreach (var level in _liquidity.Where(l => l.Swept && l.SweptBar == bar && l.WasTrap == null))
-                level.WasTrap = level.BuySide ? candle.Close < level.Price : candle.Close > level.Price;
         }
 
-        private void Mitigate(Zone zone, int bar)
+        private void Mitigate(Zone zone, int bar, string reason = "")
         {
             if (zone.State == ZoneState.Mitigated)
                 return;
 
             zone.State = ZoneState.Mitigated;
             zone.EndBar = bar;
-            JournalEvent(bar, "ZoneMitigated", zone.IsBullish ? "Bull" : "Bear", zone, 0m, "");
+            zone.MitigationReason = reason;
+            JournalEvent(bar, "ZoneMitigated", zone.IsBullish ? "Bull" : "Bear", zone, 0m, reason);
 
             // Position-management alert: the zone behind a still-open signal just
             // died — whoever entered off it should know the structural basis is gone.
             // Fires once per zone (this method is idempotent) and only in realtime.
             if (AlertOnSignalZoneInvalidated)
             {
-                var affected = _openSignals.FirstOrDefault(s => !s.Resolved && s.TriggerZoneId == zone.Id);
+                // A first-touch entry and an AnyTouch/Midline consumption can be
+                // one valid atomic event. Do not immediately warn that the just-
+                // filled signal's own trigger "died" on its fill bar.
+                var affected = _openSignals.FirstOrDefault(s => !s.Resolved && s.TriggerZoneId == zone.Id &&
+                                                                 s.FillBar < bar);
                 if (affected != null)
                     Fire($"❌ Signal zone invalidated — {zone.Tag}\n" +
                          $"📍 Zone: {FormatPrice(zone.Bottom)}–{FormatPrice(zone.Top)}\n" +
@@ -524,7 +864,24 @@ namespace ICTSMC
             if (_swingLows.Count > 300)
                 _swingLows.RemoveRange(0, _swingLows.Count - 300);
 
-            _liquidity.RemoveAll(l => l.Swept && l.SweptBar.HasValue && bar - l.SweptBar.Value > KeepMitigatedBars);
+            if (_externalStructure.Count > 150)
+                _externalStructure.RemoveRange(0, _externalStructure.Count - 150);
+
+            if (_externalSwingHighs.Count > 300)
+                _externalSwingHighs.RemoveRange(0, _externalSwingHighs.Count - 300);
+
+            if (_externalSwingLows.Count > 300)
+                _externalSwingLows.RemoveRange(0, _externalSwingLows.Count - 300);
+
+            _liquidity.RemoveAll(l => l.Swept && l.SweptBar.HasValue && bar - l.SweptBar.Value > SweptRetentionBars);
+
+            var retainEventsFor = Math.Max(SweptRetentionBars, SweepToMssWindow + ArmWindowBars + 5);
+            var protectedEventIds = new HashSet<int>(new[]
+            {
+                _bullStrictSetup?.LiquidityEventId ?? 0,
+                _bearStrictSetup?.LiquidityEventId ?? 0
+            });
+            _liquidityEvents.RemoveAll(e => bar - e.TakenBar > retainEventsFor && !protectedEventIds.Contains(e.Id));
         }
 
         #endregion
@@ -546,7 +903,7 @@ namespace ICTSMC
         /// Once configured, the aggregators are retro-fed the full history so HTF
         /// zones exist from the very first chart bar.
         /// </summary>
-        private void UpdateHtf(int bar)
+        private void UpdateHtf(int bar, int nextBar)
         {
             if (!HtfEnabled)
                 return;
@@ -561,16 +918,24 @@ namespace ICTSMC
                     ConfigureHtfLayers();
                     _htfConfigured = true;
 
+                    // During initial configuration the chart-TF engine has already
+                    // processed earlier bars. Rebuild HTF strictly in chronological
+                    // order, inject each closed bucket at its confirmation bar, and
+                    // reconcile every historical HTF POI before it can become live.
                     for (var i = 1; i <= bar; i++)
+                    {
+                        var followingBar = i < bar ? i + 1 : nextBar;
                         foreach (var agg in _htfAggregators)
-                            FeedAggregator(agg, i);
+                            FeedAggregator(agg, i, followingBar);
+                        ReconcileHistoricalHtfZonesThrough(i);
+                    }
                 }
 
                 return;
             }
 
             foreach (var agg in _htfAggregators)
-                FeedAggregator(agg, bar);
+                FeedAggregator(agg, bar, nextBar);
         }
 
         private void CollectBarDeltaSample(int bar)
@@ -668,6 +1033,7 @@ namespace ICTSMC
         private void ConfigureHtfLayers()
         {
             _htfAggregators.Clear();
+            _htfSyntheticUnsafe = false;
 
             var chartMinutes = EstimateChartMinutes(out var regular, out var approx);
             var layers = new List<int>();
@@ -686,8 +1052,29 @@ namespace ICTSMC
                     layers.Add(secondary);
             }
 
-            foreach (var minutes in layers)
+            // A synthetic HTF candle is only trustworthy when every chart candle
+            // lies wholly inside exactly one HTF bucket. Do not silently generate
+            // signal-driving POIs from range/tick/volume charts or non-divisible
+            // timeframes unless the user explicitly accepts that approximation.
+            if (!regular && !AllowSyntheticHtfOnIrregularCharts)
+            {
+                _htfSyntheticUnsafe = true;
+                layers.Clear();
+            }
+
+            foreach (var minutes in layers.Distinct())
+            {
+                if (minutes <= chartMinutes)
+                    continue;
+
+                if (!AllowSyntheticHtfOnIrregularCharts && minutes % chartMinutes != 0)
+                {
+                    _htfSyntheticUnsafe = true;
+                    continue;
+                }
+
                 _htfAggregators.Add(new HtfAggregator { Minutes = minutes, Label = MinutesToLabel(minutes) });
+            }
 
             var layerText = _htfAggregators.Count == 0
                 ? "none (chart TF too high)"
@@ -700,6 +1087,9 @@ namespace ICTSMC
             _htfInfo = HtfMode == HtfSelectionMode.Manual
                 ? $"HTF manual: {layerText} · chart {chartText}"
                 : $"HTF auto: {layerText} · chart {chartText}";
+
+            if (_htfSyntheticUnsafe)
+                _htfInfo += " · synthetic HTF disabled (irregular/non-aligned chart)";
 
             // The measured chart TF doubles as the alert identity ("GC 1H") and
             // registers this chart with the Telegram command hub (/shot).
@@ -715,7 +1105,12 @@ namespace ICTSMC
         /// </summary>
         private DateTime GetBucketStart(DateTime time, int minutes)
         {
-            var anchorTicks = minutes >= 1440 ? TimeSpan.FromMinutes(DailyAnchorMinutes).Ticks : 0L;
+            // A daily session offset is meaningful for daily buckets only. Weekly
+            // buckets remain Monday-aligned and are not silently shifted by a
+            // daily futures-session setting.
+            var anchorTicks = minutes >= 1440 && minutes < 10080
+                ? TimeSpan.FromMinutes(DailyAnchorMinutes).Ticks
+                : 0L;
             var span = TimeSpan.FromMinutes(minutes).Ticks;
             var shifted = time.Ticks - anchorTicks;
 
@@ -725,111 +1120,392 @@ namespace ICTSMC
             return new DateTime(shifted - shifted % span + anchorTicks);
         }
 
-        private void FeedAggregator(HtfAggregator agg, int bar)
+        /// <summary>
+        /// Feeds one completed chart candle. The following chart bar is supplied so
+        /// an HTF bucket is closed and injected before the first observation of the
+        /// new chart bar, instead of one chart bar late.
+        /// </summary>
+        private void FeedAggregator(HtfAggregator agg, int bar, int nextBar)
         {
             var candle = GetCandle(bar);
             var bucketStart = GetBucketStart(candle.Time, agg.Minutes);
 
-            if (agg.Current == null || bucketStart > agg.Current.BucketStart)
+            if (agg.Current == null)
             {
-                if (agg.Current != null)
-                {
-                    agg.Candles.Add(agg.Current);
-                    OnHtfCandleClosed(agg);
-                }
-
-                agg.Current = new HtfCandle
-                {
-                    BucketStart = bucketStart,
-                    FirstChartBar = bar,
-                    Open = candle.Open,
-                    High = candle.High,
-                    Low = candle.Low,
-                    Close = candle.Close
-                };
+                agg.Current = NewHtfCandle(bucketStart, bar, candle.Open, candle.High, candle.Low, candle.Close);
+            }
+            else if (bucketStart != agg.Current.BucketStart)
+            {
+                // Defensive path for a discontinuity discovered while replaying.
+                // The current completed bar is the first reliable confirmation
+                // point available in that case.
+                CloseHtfCurrent(agg, bar);
+                agg.Current = NewHtfCandle(bucketStart, bar, candle.Open, candle.High, candle.Low, candle.Close);
             }
             else
             {
                 agg.Current.High = Math.Max(agg.Current.High, candle.High);
                 agg.Current.Low = Math.Min(agg.Current.Low, candle.Low);
                 agg.Current.Close = candle.Close;
+                agg.Current.LastChartBar = bar;
             }
 
-            if (agg.Candles.Count > 400)
-                agg.Candles.RemoveRange(0, agg.Candles.Count - 400);
+            if (nextBar <= bar)
+                return;
+
+            var nextBucket = GetBucketStart(GetCandle(nextBar).Time, agg.Minutes);
+            if (nextBucket != agg.Current.BucketStart)
+                CloseHtfCurrent(agg, nextBar);
         }
 
-        private void OnHtfCandleClosed(HtfAggregator agg)
+        private static HtfCandle NewHtfCandle(DateTime bucketStart, int chartBar,
+            decimal open, decimal high, decimal low, decimal close) => new()
+        {
+            BucketStart = bucketStart,
+            FirstChartBar = chartBar,
+            LastChartBar = chartBar,
+            Open = open,
+            High = high,
+            Low = low,
+            Close = close
+        };
+
+        private void CloseHtfCurrent(HtfAggregator agg, int confirmedChartBar)
+        {
+            if (agg.Current == null)
+                return;
+
+            agg.Candles.Add(agg.Current);
+            agg.Current = null;
+            OnHtfCandleClosed(agg, confirmedChartBar);
+            TrimHtfHistory(agg);
+        }
+
+        private void TrimHtfHistory(HtfAggregator agg)
+        {
+            const int maxCandles = 500;
+            if (agg.Candles.Count <= maxCandles)
+                return;
+
+            var removed = agg.Candles.Count - maxCandles;
+            agg.Candles.RemoveRange(0, removed);
+            agg.SwingHighs.RemoveAll(s => s.Bar < removed);
+            agg.SwingLows.RemoveAll(s => s.Bar < removed);
+            foreach (var swing in agg.SwingHighs)
+                swing.Bar -= removed;
+            foreach (var swing in agg.SwingLows)
+                swing.Bar -= removed;
+            agg.LastSwingHigh = agg.SwingHighs.LastOrDefault();
+            agg.LastSwingLow = agg.SwingLows.LastOrDefault();
+        }
+
+        private void OnHtfCandleClosed(HtfAggregator agg, int confirmedChartBar)
+        {
+            UpdateHtfAtr(agg);
+            ConfirmHtfSwings(agg);
+            var structure = DetectHtfStructureBreak(agg);
+            if (structure != null)
+            {
+                JournalEvent(confirmedChartBar, structure.IsMss ? "HTF MSS" : "HTF BoS",
+                    structure.Bullish ? "Bull" : "Bear", null, structure.Level,
+                    $"{agg.Label}; protected HTF swing {structure.FromBar}; displacement-qualified");
+            }
+            DetectHtfFvg(agg, confirmedChartBar);
+            if (structure != null)
+                CreateHtfOrderBlock(agg, structure, confirmedChartBar);
+            ApplyHtfBodyCloseMitigation(agg, confirmedChartBar);
+        }
+
+        private void UpdateHtfAtr(HtfAggregator agg)
         {
             var candles = agg.Candles;
-            var n = candles.Count;
+            if (candles.Count == 0)
+                return;
 
-            if (HtfFvgEnabled && n >= 3)
+            var last = candles[^1];
+            var tr = last.High - last.Low;
+            if (candles.Count > 1)
             {
-                var a = candles[n - 3];
-                var c = candles[n - 2];
-                var b = candles[n - 1];
-
-                var minSize = Math.Max(MinFvgTicks * TickSize, _atr * MinFvgAtrFraction);
-
-                if (b.Low > a.High && b.Low - a.High >= minSize)
-                {
-                    AddZone(new Zone
-                    {
-                        Type = ZoneType.BullFvg,
-                        IsHtf = true,
-                        HtfLabel = agg.Label,
-                        HtfMinutes = agg.Minutes,
-                        StartBar = c.FirstChartBar,
-                        Top = b.Low,
-                        Bottom = a.High
-                    });
-                }
-                else if (b.High < a.Low && a.Low - b.High >= minSize)
-                {
-                    AddZone(new Zone
-                    {
-                        Type = ZoneType.BearFvg,
-                        IsHtf = true,
-                        HtfLabel = agg.Label,
-                        HtfMinutes = agg.Minutes,
-                        StartBar = c.FirstChartBar,
-                        Top = a.Low,
-                        Bottom = b.High
-                    });
-                }
+                var previousClose = candles[^2].Close;
+                tr = Math.Max(tr, Math.Max(Math.Abs(last.High - previousClose), Math.Abs(last.Low - previousClose)));
             }
 
-            if (HtfObEnabled && n >= 6)
+            if (!agg.AtrSeeded)
             {
-                var last = candles[n - 1];
-                var avgRange = candles.Skip(Math.Max(0, n - 11)).Take(10).Average(x => x.High - x.Low);
-
-                if (avgRange > 0 && last.High - last.Low >= avgRange * HtfDisplacementFactor)
-                {
-                    var bullish = last.Close > last.Open;
-
-                    for (var i = n - 2; i >= Math.Max(0, n - 6); i--)
-                    {
-                        var c = candles[i];
-                        var isOpposite = bullish ? c.Close < c.Open : c.Close > c.Open;
-                        if (!isOpposite)
-                            continue;
-
-                        AddZone(new Zone
-                        {
-                            Type = bullish ? ZoneType.BullOrderBlock : ZoneType.BearOrderBlock,
-                            IsHtf = true,
-                            HtfLabel = agg.Label,
-                        HtfMinutes = agg.Minutes,
-                            StartBar = c.FirstChartBar,
-                            Top = ObStyle == ObZoneStyle.Body ? Math.Max(c.Open, c.Close) : c.High,
-                            Bottom = ObStyle == ObZoneStyle.Body ? Math.Min(c.Open, c.Close) : c.Low
-                        });
-                        break;
-                    }
-                }
+                agg.Atr = tr;
+                agg.AtrSeeded = true;
             }
+            else
+            {
+                agg.Atr += (tr - agg.Atr) / AtrPeriod;
+            }
+        }
+
+        private void ConfirmHtfSwings(HtfAggregator agg)
+        {
+            var candles = agg.Candles;
+            var p = candles.Count - 1 - HtfSwingPeriod;
+            if (p < HtfSwingPeriod)
+                return;
+
+            var pivot = candles[p];
+            var high = true;
+            var low = true;
+            for (var j = p - HtfSwingPeriod; j <= p + HtfSwingPeriod; j++)
+            {
+                if (j == p)
+                    continue;
+
+                if (candles[j].High > pivot.High)
+                    high = false;
+                if (candles[j].Low < pivot.Low)
+                    low = false;
+                if (!high && !low)
+                    return;
+            }
+
+            if (high && (agg.SwingHighs.Count == 0 || agg.SwingHighs[^1].Bar != p))
+            {
+                var swing = new SwingPoint { Bar = p, Price = pivot.High };
+                agg.SwingHighs.Add(swing);
+                agg.LastSwingHigh = swing;
+            }
+
+            if (low && (agg.SwingLows.Count == 0 || agg.SwingLows[^1].Bar != p))
+            {
+                var swing = new SwingPoint { Bar = p, Price = pivot.Low };
+                agg.SwingLows.Add(swing);
+                agg.LastSwingLow = swing;
+            }
+        }
+
+        private StructureEvent DetectHtfStructureBreak(HtfAggregator agg)
+        {
+            if (agg.Candles.Count == 0)
+                return null;
+
+            var last = agg.Candles[^1];
+            var displaced = agg.Atr <= 0m || last.High - last.Low >= agg.Atr * HtfDisplacementFactor;
+            if (!displaced)
+                return null;
+
+            if (agg.LastSwingHigh is { Broken: false } high && last.Close > high.Price)
+            {
+                high.Broken = true;
+                var evt = new StructureEvent
+                {
+                    Id = ++_nextStructureEventId,
+                    Bar = agg.Candles.Count - 1,
+                    FromBar = high.Bar,
+                    Level = high.Price,
+                    Bullish = true,
+                    IsMss = agg.Trend == -1,
+                    Scope = StructureScope.External
+                };
+                agg.Trend = 1;
+                return evt;
+            }
+
+            if (agg.LastSwingLow is { Broken: false } low && last.Close < low.Price)
+            {
+                low.Broken = true;
+                var evt = new StructureEvent
+                {
+                    Id = ++_nextStructureEventId,
+                    Bar = agg.Candles.Count - 1,
+                    FromBar = low.Bar,
+                    Level = low.Price,
+                    Bullish = false,
+                    IsMss = agg.Trend == 1,
+                    Scope = StructureScope.External
+                };
+                agg.Trend = -1;
+                return evt;
+            }
+
+            return null;
+        }
+
+        private void DetectHtfFvg(HtfAggregator agg, int confirmedChartBar)
+        {
+            if (!HtfFvgEnabled || agg.Candles.Count < 3)
+                return;
+
+            var candles = agg.Candles;
+            var a = candles[^3];
+            var middle = candles[^2];
+            var b = candles[^1];
+            var minSize = Math.Max(MinFvgTicks * TickSize, agg.Atr * MinFvgAtrFraction);
+
+            if (b.Low > a.High && b.Low - a.High >= minSize)
+            {
+                RegisterHtfZone(new Zone
+                {
+                    Type = ZoneType.BullFvg,
+                    IsHtf = true,
+                    HtfLabel = agg.Label,
+                    HtfMinutes = agg.Minutes,
+                    StartBar = middle.FirstChartBar,
+                    ConfirmedBar = confirmedChartBar,
+                    EligibleFromBar = confirmedChartBar,
+                    Top = b.Low,
+                    Bottom = a.High
+                }, confirmedChartBar);
+            }
+            else if (b.High < a.Low && a.Low - b.High >= minSize)
+            {
+                RegisterHtfZone(new Zone
+                {
+                    Type = ZoneType.BearFvg,
+                    IsHtf = true,
+                    HtfLabel = agg.Label,
+                    HtfMinutes = agg.Minutes,
+                    StartBar = middle.FirstChartBar,
+                    ConfirmedBar = confirmedChartBar,
+                    EligibleFromBar = confirmedChartBar,
+                    Top = a.Low,
+                    Bottom = b.High
+                }, confirmedChartBar);
+            }
+        }
+
+        private void CreateHtfOrderBlock(HtfAggregator agg, StructureEvent structure, int confirmedChartBar)
+        {
+            if (!HtfObEnabled || agg.Candles.Count < 2)
+                return;
+
+            var candles = agg.Candles;
+            var start = Math.Max(0, candles.Count - 1 - ObLookback);
+            for (var i = candles.Count - 2; i >= start; i--)
+            {
+                var source = candles[i];
+                var opposite = structure.Bullish ? source.Close < source.Open : source.Close > source.Open;
+                if (!opposite)
+                    continue;
+
+                RegisterHtfZone(new Zone
+                {
+                    Type = structure.Bullish ? ZoneType.BullOrderBlock : ZoneType.BearOrderBlock,
+                    IsHtf = true,
+                    HtfLabel = agg.Label,
+                    HtfMinutes = agg.Minutes,
+                    StartBar = source.FirstChartBar,
+                    ConfirmedBar = confirmedChartBar,
+                    EligibleFromBar = confirmedChartBar,
+                    ConfirmingStructureBar = structure.Id,
+                    Top = ObStyle == ObZoneStyle.Body ? Math.Max(source.Open, source.Close) : source.High,
+                    Bottom = ObStyle == ObZoneStyle.Body ? Math.Min(source.Open, source.Close) : source.Low
+                }, confirmedChartBar);
+                return;
+            }
+        }
+
+        private void ApplyHtfBodyCloseMitigation(HtfAggregator agg, int confirmedChartBar)
+        {
+            if (agg.Candles.Count == 0)
+                return;
+
+            var close = agg.Candles[^1].Close;
+            var inversions = new List<Zone>();
+            foreach (var zone in _zones)
+            {
+                if (!zone.IsHtf || zone.HtfMinutes != agg.Minutes || zone.ConfirmedBar >= confirmedChartBar)
+                    continue;
+
+                var rule = zone.IsOrderBlock ? ObMitigation : FvgMitigation;
+                if (zone.State != ZoneState.Mitigated && rule == MitigationRule.BodyClose &&
+                    StrictRules.IsBodyCloseInvalidated(zone.IsBullish, close, zone.Top, zone.Bottom))
+                {
+                    Mitigate(zone, confirmedChartBar, "HTF BodyClose");
+                }
+
+                if (!IfvgEnabled || zone.Inverted ||
+                    zone.Type is not (ZoneType.BullFvg or ZoneType.BearFvg) ||
+                    (zone.State == ZoneState.Mitigated &&
+                     (!zone.EndBar.HasValue || confirmedChartBar - zone.EndBar.Value > 3)) ||
+                    !StrictRules.IsBodyCloseInvalidated(zone.IsBullish, close, zone.Top, zone.Bottom))
+                    continue;
+
+                zone.Inverted = true;
+                if (zone.State != ZoneState.Mitigated)
+                    Mitigate(zone, confirmedChartBar, "HTF IFVG body-close conversion");
+
+                inversions.Add(new Zone
+                {
+                    Type = zone.Type == ZoneType.BullFvg ? ZoneType.BearIfvg : ZoneType.BullIfvg,
+                    IsHtf = true,
+                    HtfLabel = agg.Label,
+                    HtfMinutes = agg.Minutes,
+                    StartBar = confirmedChartBar,
+                    ConfirmedBar = confirmedChartBar,
+                    EligibleFromBar = confirmedChartBar,
+                    Top = zone.Top,
+                    Bottom = zone.Bottom
+                });
+            }
+
+            foreach (var inversion in inversions)
+            {
+                RegisterHtfZone(inversion, confirmedChartBar);
+                JournalEvent(confirmedChartBar, "ZoneInverted", inversion.IsBullish ? "Bull" : "Bear", inversion, 0m,
+                    "HTF FVG flipped polarity (source-timeframe body close through)");
+            }
+        }
+
+        private void RegisterHtfZone(Zone proposed, int confirmedChartBar)
+        {
+            AddZone(proposed);
+        }
+
+        private void ReconcileHistoricalHtfZonesThrough(int throughBar)
+        {
+            foreach (var zone in _zones.Where(z => z.IsHtf).ToList())
+                ReconcileHistoricalHtfZone(zone, throughBar);
+        }
+
+        private void ReconcileHistoricalHtfZone(Zone zone, int throughBar)
+        {
+            if (!zone.IsHtf || throughBar < zone.EligibleFromBar)
+                return;
+
+            if (zone.State == ZoneState.Mitigated)
+            {
+                zone.HistoricalReconciledThroughBar = Math.Max(zone.HistoricalReconciledThroughBar, throughBar);
+                return;
+            }
+
+            var from = Math.Max(zone.EligibleFromBar, zone.HistoricalReconciledThroughBar + 1);
+            for (var bar = from; bar <= throughBar; bar++)
+            {
+                if (zone.State == ZoneState.Mitigated)
+                    break;
+
+                var candle = GetCandle(bar);
+                if (!StrictRules.HasOhlcIntersection(candle.High, candle.Low, zone.Top, zone.Bottom))
+                    continue;
+
+                if (zone.FirstPresentationBar == null)
+                {
+                    zone.FirstPresentationBar = bar;
+                    zone.FirstPresentationTime = BarTime(bar);
+                    zone.State = ZoneState.Touched;
+                    zone.TouchEpisodes = 1;
+                }
+
+                zone.LastTouchedBar = bar;
+                zone.CoreEntryConsumed = true;
+                var rule = zone.IsOrderBlock ? ObMitigation : FvgMitigation;
+                var reachedMid = zone.IsBullish ? candle.Low <= zone.Mid : candle.High >= zone.Mid;
+                var reachedFar = zone.IsBullish ? candle.Low <= zone.Bottom : candle.High >= zone.Top;
+                if (rule == MitigationRule.AnyTouch)
+                    Mitigate(zone, bar, "Historical HTF AnyTouch");
+                else if (rule == MitigationRule.Midline && reachedMid)
+                    Mitigate(zone, bar, "Historical HTF Midline");
+                else if (rule == MitigationRule.FullFill && reachedFar)
+                    Mitigate(zone, bar, "Historical HTF FullFill");
+            }
+
+            zone.HistoricalReconciledThroughBar = Math.Max(zone.HistoricalReconciledThroughBar, throughBar);
         }
 
         #endregion

@@ -83,9 +83,9 @@ namespace ICTSMC
         private const string EventsHeader =
             "Time,Mode,Instrument,Event,Direction,ZoneId,ZoneTag,Layer,Top,Bottom,Price,Extra";
         private const string SignalsHeader =
-            "SignalId,Time,Mode,Instrument,Direction,Tier,ArmSource,TriggerTag,Layer,ZoneTop,ZoneBottom,Entry,SL,TP2,TP3,PdStatus,Confluence";
+            "SignalId,Time,Mode,Instrument,Direction,Tier,ArmSource,TriggerTag,Layer,ZoneTop,ZoneBottom,PlannedEntry,FillPrice,SL,TP2,TP3,FillStatus,DataQuality,FillBar,FillSequence,ExitPlan,PdStatus,Confluence";
         private const string OutcomesHeader =
-            "SignalId,ResolvedTime,Mode,Outcome,ExitPrice,RMultiple,BE1R_R,Partial2R_R,MAE_R,MFE_R,BarsHeld,Direction,Tier,ArmSource,TriggerTag,Layer";
+            "SignalId,ResolvedTime,Mode,Outcome,ExitPrice,RealizedR,MAE_R,MFE_R,BarsHeld,Direction,Tier,ArmSource,TriggerTag,Layer,FillStatus,DataQuality,ExitPlan";
 
         #endregion
 
@@ -259,7 +259,11 @@ namespace ICTSMC
 
         private void JournalSignal(SignalRecord record)
         {
-            _openSignals.Add(record);
+            // A setup, an OHLC-only candidate, and an executable fill are distinct
+            // audit objects. Only an ordered, verified fill may enter outcome
+            // tracking or headline performance statistics.
+            if (record.FillStatus == SignalFillStatus.Filled && !record.Resolved)
+                _openSignals.Add(record);
 
             if (!JournalEnabled)
                 return;
@@ -276,10 +280,16 @@ namespace ICTSMC
                 Csv(record.Layer),
                 Num(record.ZoneTop),
                 Num(record.ZoneBottom),
+                Num(record.PlannedEntry),
                 Num(record.Entry),
                 Num(record.Sl),
                 Num(record.Tp2),
                 Num(record.Tp3),
+                record.FillStatus.ToString(),
+                record.DataQuality.ToString(),
+                record.FillBar.ToString(CultureInfo.InvariantCulture),
+                record.FillSequence.ToString(CultureInfo.InvariantCulture),
+                record.ExitPlan.ToString(),
                 record.PdStatus,
                 Csv(record.Confluence));
 
@@ -287,9 +297,9 @@ namespace ICTSMC
         }
 
         /// <summary>
-        /// Runs on every COMPLETED bar: updates MAE/MFE for open signals and resolves
-        /// them. Resolution is deliberately conservative: if a bar touches both the
-        /// stop and a target, the stop is assumed to have been hit first.
+        /// Bar-close maintenance is intentionally timeout-only. Price-path outcome
+        /// handling lives in the ordered-observation V2 execution pipeline; using
+        /// OHLC extremes here would overwrite a known tick path with an invented one.
         /// </summary>
         private void UpdateOpenSignals(int bar)
         {
@@ -297,58 +307,22 @@ namespace ICTSMC
                 return;
 
             var candle = GetCandle(bar);
-
-            for (var i = _openSignals.Count - 1; i >= 0; i--)
+            foreach (var s in _openSignals.ToList())
             {
-                var s = _openSignals[i];
-                if (bar <= s.SignalBar)
+                if (s.Resolved || s.FillStatus != SignalFillStatus.Filled || bar - s.FillBar < SignalTimeoutBars)
                     continue;
 
-                if (s.Long)
-                {
-                    s.Mfe = Math.Max(s.Mfe, candle.High - s.Entry);
-                    s.Mae = Math.Max(s.Mae, s.Entry - candle.Low);
-                }
-                else
-                {
-                    s.Mfe = Math.Max(s.Mfe, s.Entry - candle.Low);
-                    s.Mae = Math.Max(s.Mae, candle.High - s.Entry);
-                }
+                var closeR = s.Risk > 0m
+                    ? (s.Long ? candle.Close - s.Entry : s.Entry - candle.Close) / s.Risk
+                    : 0m;
+                var realized = s.ExitPlan == ExitPlan.PartialAtTp2RunnerToTp3 && s.PartialTaken
+                    ? 1m + 0.5m * closeR
+                    : closeR;
+                var outcome = s.ExitPlan == ExitPlan.PartialAtTp2RunnerToTp3 && s.PartialTaken
+                    ? "TimeoutAfterTP2"
+                    : "Timeout";
 
-                var slHit = s.Long ? candle.Low <= s.Sl : candle.High >= s.Sl;
-                var tp3Hit = s.Long ? candle.High >= s.Tp3 : candle.Low <= s.Tp3;
-                var tp2Hit = s.Long ? candle.High >= s.Tp2 : candle.Low <= s.Tp2;
-
-                UpdateShadowManagement(s, candle.High, candle.Low, slHit, tp2Hit, tp3Hit);
-
-                if (slHit)
-                {
-                    Resolve(s, bar, "SL", s.Sl, -1m);
-                }
-                else if (tp3Hit)
-                {
-                    Resolve(s, bar, "TP3", s.Tp3, 3m);
-                }
-                else if (tp2Hit)
-                {
-                    s.Tp2Hit = true;
-                    if (bar - s.SignalBar >= SignalTimeoutBars)
-                        Resolve(s, bar, "TP2", s.Tp2, 2m);
-                }
-                else if (bar - s.SignalBar >= SignalTimeoutBars)
-                {
-                    if (s.Tp2Hit)
-                    {
-                        Resolve(s, bar, "TP2", s.Tp2, 2m);
-                    }
-                    else
-                    {
-                        var r = s.Risk > 0
-                            ? (s.Long ? candle.Close - s.Entry : s.Entry - candle.Close) / s.Risk
-                            : 0m;
-                        Resolve(s, bar, "Timeout", candle.Close, r);
-                    }
-                }
+                ResolveFilledSignal(s, bar, outcome, candle.Close, realized);
             }
         }
 
@@ -509,32 +483,22 @@ namespace ICTSMC
                  "👋 Consider exiting, tightening the stop, or stepping aside");
         }
 
-        private void Resolve(SignalRecord s, int bar, string outcome, decimal exit, decimal rMultiple)
+        private void ResolveFilledSignal(SignalRecord s, int bar, string outcome, decimal exit, decimal realizedR)
         {
+            if (s.Resolved || s.FillStatus != SignalFillStatus.Filled)
+                return;
+
             s.Resolved = true;
             s.Outcome = outcome;
             s.Exit = exit;
             s.ResolvedBar = bar;
+            s.RealizedR = realizedR;
 
             var risk = s.Risk;
-
-            // Finalize shadows still open at raw resolution (timeout / TP2-latch paths;
-            // SL and TP3 shadows always close bar-by-bar before this point). A shadow
-            // whose trigger never fired simply mirrors the raw outcome.
-            var close = GetCandle(bar).Close;
-            var closeR = risk > 0 ? (s.Long ? close - s.Entry : s.Entry - close) / risk : 0m;
-
-            if (!s.BeDone)
-            {
-                s.BeDone = true;
-                s.BeR = s.BeTp2 ? 2m : s.BeArmed ? closeR : rMultiple;
-            }
-
-            if (!s.PartialDone)
-            {
-                s.PartialDone = true;
-                s.PartialR = s.PartialTaken ? 1m + 0.5m * closeR : rMultiple;
-            }
+            s.BeDone = true;
+            s.PartialDone = true;
+            s.BeR = realizedR;
+            s.PartialR = realizedR;
 
             _openSignals.Remove(s);
             _resolvedSignals.Add(s);
@@ -556,21 +520,27 @@ namespace ICTSMC
                 s.Live ? "LIVE" : "HIST",
                 outcome,
                 Num(exit),
-                Num(rMultiple),
-                Num(s.BeR),
-                Num(s.PartialR),
+                Num(realizedR),
                 Num(maeR),
                 Num(mfeR),
-                (bar - s.SignalBar).ToString(CultureInfo.InvariantCulture),
+                (bar - s.FillBar).ToString(CultureInfo.InvariantCulture),
                 s.Long ? "Long" : "Short",
                 s.Tier,
                 s.ArmSource,
                 Csv(s.TriggerTag),
-                Csv(s.Layer));
+                Csv(s.Layer),
+                s.FillStatus.ToString(),
+                s.DataQuality.ToString(),
+                s.ExitPlan.ToString());
 
             JournalWrite("outcomes.csv", OutcomesHeader, line);
             WriteAnalytics();
         }
+
+        // Compatibility shim for legacy helpers that remain compiled but are no
+        // longer reachable from the V2 execution pipeline.
+        private void Resolve(SignalRecord s, int bar, string outcome, decimal exit, decimal rMultiple) =>
+            ResolveFilledSignal(s, bar, outcome, exit, rMultiple);
 
         #endregion
 
@@ -588,9 +558,11 @@ namespace ICTSMC
 
             // Analytics must mirror what outcomes.csv contains: in LIVE-only mode
             // that means live-fired signals exclusively.
-            var pool = JournalLiveOnly
-                ? _resolvedSignals.Where(s => s.Live).ToList()
-                : _resolvedSignals;
+            var pool = (JournalLiveOnly
+                    ? _resolvedSignals.Where(s => s.Live)
+                    : _resolvedSignals)
+                .Where(s => s.IsAnalyticsEligible)
+                .ToList();
 
             if (pool.Count == 0)
                 return;
@@ -598,14 +570,18 @@ namespace ICTSMC
             var sb = new StringBuilder();
             sb.AppendLine("GroupBy,Key,Signals,Wins,Losses,Timeouts,WinRatePct,AvgR,AvgBE1R_R,AvgPartial2R_R,AvgMAE_R,AvgMFE_R");
 
-            AppendGroup(sb, pool, "ZoneFamily", s => s.ZoneFamily);
-            AppendGroup(sb, pool, "Layer", s => s.Layer);
-            AppendGroup(sb, pool, "ArmSource", s => s.ArmSource);
-            AppendGroup(sb, pool, "Tier", s => s.Tier);
-            AppendGroup(sb, pool, "Direction", s => s.Long ? "Long" : "Short");
-            AppendGroup(sb, pool, "Family+ArmSource", s => $"{s.ZoneFamily}/{s.ArmSource}");
-            AppendGroup(sb, pool, "Family+Layer", s => $"{s.ZoneFamily}/{s.Layer}");
-            AppendGroup(sb, pool, "ALL", _ => "ALL");
+            var strict = pool.Where(s => s.Tier != "C").ToList();
+            var experimental = pool.Where(s => s.Tier == "C").ToList();
+
+            AppendGroup(sb, strict, "Strict.ZoneFamily", s => s.ZoneFamily);
+            AppendGroup(sb, strict, "Strict.Layer", s => s.Layer);
+            AppendGroup(sb, strict, "Strict.ArmSource", s => s.ArmSource);
+            AppendGroup(sb, strict, "Strict.Tier", s => s.Tier);
+            AppendGroup(sb, strict, "Strict.Direction", s => s.Long ? "Long" : "Short");
+            AppendGroup(sb, strict, "Strict.ALL", _ => "ALL");
+            AppendGroup(sb, experimental, "Experimental.ZoneFamily", s => s.ZoneFamily);
+            AppendGroup(sb, experimental, "Experimental.ArmSource", s => s.ArmSource);
+            AppendGroup(sb, experimental, "Experimental.ALL", _ => "ALL");
 
             var path = Path.Combine(JournalDir, $"{_sessionStamp}-analytics.csv");
             var text = sb.ToString();
@@ -619,22 +595,19 @@ namespace ICTSMC
 
         private void AppendGroup(StringBuilder sb, List<SignalRecord> pool, string groupName, Func<SignalRecord, string> selector)
         {
+            if (pool.Count == 0)
+                return;
+
             foreach (var group in pool.GroupBy(selector).OrderBy(g => g.Key))
             {
                 var total = group.Count();
-                var wins = group.Count(s => s.Outcome is "TP2" or "TP3");
-                var losses = group.Count(s => s.Outcome == "SL");
-                var timeouts = group.Count(s => s.Outcome == "Timeout");
+                var wins = group.Count(s => s.RealizedR > 0m);
+                var losses = group.Count(s => s.RealizedR < 0m);
+                var timeouts = group.Count(s => s.Outcome.StartsWith("Timeout", StringComparison.Ordinal));
                 var decisive = wins + losses;
                 var winRate = decisive > 0 ? wins * 100m / decisive : 0m;
 
-                var avgR = group.Average(s => s.Outcome switch
-                {
-                    "SL" => -1m,
-                    "TP2" => 2m,
-                    "TP3" => 3m,
-                    _ => s.Risk > 0 ? (s.Long ? s.Exit - s.Entry : s.Entry - s.Exit) / s.Risk : 0m
-                });
+                var avgR = group.Average(s => s.RealizedR);
 
                 var avgBe = group.Average(s => s.BeR);
                 var avgPartial = group.Average(s => s.PartialR);

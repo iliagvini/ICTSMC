@@ -20,12 +20,7 @@ namespace ICTSMC
         /// Detects zone touches, liquidity sweeps, touch-based mitigation and
         /// entry-model triggers the instant they happen — no waiting for the close.
         /// </summary>
-        private void ProcessIntrabar(int bar)
-        {
-            CheckLiquiditySweeps(bar);
-            CheckZoneTouches(bar);
-            TickEntryModel(bar);
-        }
+        private void ProcessIntrabar(int bar, decimal value) => ProcessV2Observation(bar, value);
 
         private void CheckLiquiditySweeps(int bar)
         {
@@ -154,7 +149,10 @@ namespace ICTSMC
 
         #region Entry model (sweep → MSS → return to zone)
 
-        private void OnStructureEvent(StructureEvent evt)
+        // Retained only as historical source reference while V2 is verified. It is
+        // deliberately never called: V1's internal-swing arming violates the V2
+        // strict external-MSS contract.
+        private void LegacyV1OnStructureEvent(StructureEvent evt)
         {
             JournalEvent(evt.Bar, evt.IsMss ? "MSS" : "BoS", evt.Bullish ? "Bull" : "Bear", null, evt.Level, "");
 

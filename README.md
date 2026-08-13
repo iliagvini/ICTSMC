@@ -5,6 +5,12 @@ A live ATAS indicator that implements the full playbook from *Mastering ICT & SM
 merely **touches** a zone, because price often reacts immediately without waiting for the
 candle to close.
 
+> **V2 correctness release.** The strict execution model is now deliberately narrower
+> than V1: confirmed liquidity trap -> external MSS -> linked first-return POI ->
+> verified price contact. V2 does not turn a wick into a confirmed reversal, invent
+> a gap-through fill, or include OHLC-order ambiguity in performance analytics. See
+> [the V2 audit](docs/V2-AUDIT.md) for the full behavior and validation scope.
+
 ## What it draws & detects
 
 | Concept (book chapter) | Implementation |

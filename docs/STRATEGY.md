@@ -3,6 +3,12 @@
 This document maps every concept from *Mastering ICT & SMC Trading* (and the standard
 institutional ICT extensions the book only hints at) to the exact place in the code.
 
+> **V2 note:** This document describes the original conceptual mapping. For the
+> authoritative V2 execution contract, data-quality policy, and corrected HTF
+> behavior, read [V2-AUDIT.md](V2-AUDIT.md). V2 intentionally supersedes legacy
+> statements here that imply internal MSS arming, failed-MSS auto-arming, or
+> deterministic OHLC fill/outcome ordering.
+
 ## 1. Liquidity (BSL / SSL, equal highs/lows)
 
 > “Liquidity = stop losses + pending orders sitting at obvious levels.”

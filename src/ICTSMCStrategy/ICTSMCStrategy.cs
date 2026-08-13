@@ -47,26 +47,44 @@ namespace ICTSMC
         private readonly List<SwingPoint> _swingLows = new();
         private readonly List<LiquidityLevel> _liquidity = new();
         private readonly List<StructureEvent> _structure = new();
+        private readonly List<LiquidityEvent> _liquidityEvents = new();
+        private readonly List<SwingPoint> _externalSwingHighs = new();
+        private readonly List<SwingPoint> _externalSwingLows = new();
+        private readonly List<StructureEvent> _externalStructure = new();
 
         // HTF engine
         private readonly List<HtfAggregator> _htfAggregators = new();
         private readonly Dictionary<long, int> _barDeltaCounts = new(); // delta seconds -> occurrences
         private readonly List<long> _barDeltaSamples = new();
         private bool _htfConfigured;
+        private bool _htfSyntheticUnsafe;
         private string _htfInfo = "";
         private string _chartTfLabel = "";
 
         private SwingPoint _lastSwingHigh;
         private SwingPoint _lastSwingLow;
+        private SwingPoint _lastExternalSwingHigh;
+        private SwingPoint _lastExternalSwingLow;
 
         /// <summary>+1 bullish, -1 bearish, 0 undefined.</summary>
         private int _trend;
+        private int _externalTrend;
 
         private decimal _atr;
         private bool _atrSeeded;
 
         private int _lastSeenBar = -1;
         private bool _realtime;
+        private bool _initialCalculationComplete;
+        /// <summary>Bars whose price path was already handled as OHLC or ordered ticks.</summary>
+        private int _lastPathProcessedBar = -1;
+        private decimal? _lastObservedPrice;
+        private int _lastObservedPriceBar = -1;
+        private long _observationSequence;
+        private int _nextLiquidityId;
+        private int _nextLiquidityEventId;
+        private int _nextStrictSetupId;
+        private int _nextStructureEventId;
 
         // Entry-model state machine
         private int _pendingBullSweepBar = -1;  // sell-side liquidity was swept (long setup precursor)
@@ -77,6 +95,8 @@ namespace ICTSMC
         private int _armedBearAtBar = -1;
         private string _armedBullSource = "";   // "Sweep" / "TrapArm" / "Sweep+Trap" / "MSS-only"
         private string _armedBearSource = "";
+        private StrictSetup _bullStrictSetup;
+        private StrictSetup _bearStrictSetup;
 
         // Impulse-leg dealing range: re-anchored on every structure break so EQ
         // tracks the CURRENT leg instead of a stale pre-break extreme.
@@ -102,6 +122,14 @@ namespace ICTSMC
         [Display(GroupName = GrpGeneral, Name = "Swing period (fractal strength)", Order = 100)]
         [Range(2, 20)]
         public int SwingPeriod { get; set; } = 3;
+
+        [Display(GroupName = GrpStructure, Name = "External swing period (strict MSS)", Order = 105)]
+        [Range(3, 50)]
+        public int ExternalSwingPeriod { get; set; } = 6;
+
+        [Display(GroupName = GrpStructure, Name = "External break buffer (ticks)", Order = 106)]
+        [Range(0, 100)]
+        public int ExternalBreakBufferTicks { get; set; } = 1;
 
         [Display(GroupName = GrpGeneral, Name = "ATR period (filters)", Order = 110)]
         [Range(5, 100)]
@@ -142,6 +170,12 @@ namespace ICTSMC
         [Display(GroupName = GrpFvg, Name = "Show FVGs", Order = 300)]
         public bool ShowFvg { get; set; } = true;
 
+        [Display(GroupName = GrpFvg, Name = "Detect chart-timeframe FVGs", Order = 302)]
+        public bool DetectLtfFvg { get; set; } = true;
+
+        [Display(GroupName = GrpFvg, Name = "Allow FVGs as strict entry POIs", Order = 304)]
+        public bool UseFvgForStrictEntry { get; set; } = true;
+
         [Display(GroupName = GrpFvg, Name = "Min gap size (ticks)", Order = 310)]
         [Range(0, 500)]
         public int MinFvgTicks { get; set; } = 2;
@@ -174,6 +208,12 @@ namespace ICTSMC
 
         [Display(GroupName = GrpOb, Name = "Show Order Blocks", Order = 400)]
         public bool ShowOb { get; set; } = true;
+
+        [Display(GroupName = GrpOb, Name = "Detect chart-timeframe Order Blocks", Order = 402)]
+        public bool DetectLtfOb { get; set; } = true;
+
+        [Display(GroupName = GrpOb, Name = "Allow Order Blocks as strict entry POIs", Order = 404)]
+        public bool UseObForStrictEntry { get; set; } = true;
 
         [Display(GroupName = GrpOb, Name = "Zone style", Order = 410)]
         public ObZoneStyle ObStyle { get; set; } = ObZoneStyle.Body;
@@ -292,15 +332,63 @@ namespace ICTSMC
             set { var v = Math.Clamp(value, 0, 1439); if (_dailyAnchorMinutes == v) return; _dailyAnchorMinutes = v; RecalculateValues(); }
         }
 
-        [Display(GroupName = GrpHtf, Name = "HTF Fair Value Gaps", Order = 720)]
-        public bool HtfFvgEnabled { get; set; } = true;
+        private bool _htfFvgEnabled = true;
+        [Display(GroupName = GrpHtf, Name = "Detect HTF Fair Value Gaps", Order = 720)]
+        public bool HtfFvgEnabled
+        {
+            get => _htfFvgEnabled;
+            set { if (_htfFvgEnabled == value) return; _htfFvgEnabled = value; RecalculateValues(); }
+        }
 
-        [Display(GroupName = GrpHtf, Name = "HTF Order Blocks", Order = 730)]
-        public bool HtfObEnabled { get; set; } = true;
+        private bool _htfObEnabled = true;
+        [Display(GroupName = GrpHtf, Name = "Detect HTF Order Blocks", Order = 730)]
+        public bool HtfObEnabled
+        {
+            get => _htfObEnabled;
+            set { if (_htfObEnabled == value) return; _htfObEnabled = value; RecalculateValues(); }
+        }
 
         [Display(GroupName = GrpHtf, Name = "HTF displacement (avg range ×)", Order = 740)]
         [Range(0, 10)]
-        public decimal HtfDisplacementFactor { get; set; } = 1.3m;
+        private decimal _htfDisplacementFactor = 1.3m;
+        public decimal HtfDisplacementFactor
+        {
+            get => _htfDisplacementFactor;
+            set { var v = Math.Max(0m, value); if (_htfDisplacementFactor == v) return; _htfDisplacementFactor = v; RecalculateValues(); }
+        }
+
+        private int _htfSwingPeriod = 3;
+        [Display(GroupName = GrpHtf, Name = "HTF swing period", Order = 742)]
+        [Range(2, 20)]
+        public int HtfSwingPeriod
+        {
+            get => _htfSwingPeriod;
+            set { var v = Math.Clamp(value, 2, 20); if (_htfSwingPeriod == v) return; _htfSwingPeriod = v; RecalculateValues(); }
+        }
+
+        private bool _htfZonesAsExecutionPoi;
+        [Display(GroupName = GrpHtf, Name = "Allow HTF zones as strict execution POIs", Order = 743)]
+        public bool HtfZonesAsExecutionPoi
+        {
+            get => _htfZonesAsExecutionPoi;
+            set { if (_htfZonesAsExecutionPoi == value) return; _htfZonesAsExecutionPoi = value; RecalculateValues(); }
+        }
+
+        private bool _htfZonesAsConfluence = true;
+        [Display(GroupName = GrpHtf, Name = "Use HTF zones for geometric confluence", Order = 744)]
+        public bool HtfZonesAsConfluence
+        {
+            get => _htfZonesAsConfluence;
+            set { if (_htfZonesAsConfluence == value) return; _htfZonesAsConfluence = value; RecalculateValues(); }
+        }
+
+        private bool _allowSyntheticHtfOnIrregularCharts;
+        [Display(GroupName = GrpHtf, Name = "Allow synthetic HTF on irregular charts", Order = 746)]
+        public bool AllowSyntheticHtfOnIrregularCharts
+        {
+            get => _allowSyntheticHtfOnIrregularCharts;
+            set { if (_allowSyntheticHtfOnIrregularCharts == value) return; _allowSyntheticHtfOnIrregularCharts = value; RecalculateValues(); }
+        }
 
         [Display(GroupName = GrpHtf, Name = "HTF zone border color", Order = 745)]
         public Color HtfBorderColor { get; set; } = Color.FromArgb(0xFF, 0x61, 0x69, 0x69);
@@ -322,6 +410,14 @@ namespace ICTSMC
         [Display(GroupName = GrpSignal, Name = "Require liquidity sweep first", Order = 810)]
         public bool RequireSweepForEntry { get; set; } = true;
 
+        [Display(GroupName = GrpSignal, Name = "Minimum sweep penetration (ticks)", Order = 812)]
+        [Range(0, 100)]
+        public int MinimumSweepPenetrationTicks { get; set; } = 1;
+
+        [Display(GroupName = GrpSignal, Name = "Minimum reclaim beyond liquidity (ticks)", Order = 814)]
+        [Range(0, 100)]
+        public int SweepReclaimTicks { get; set; } = 1;
+
         [Display(GroupName = GrpSignal, Name = "Sweep → MSS window (bars)", Order = 820)]
         [Range(1, 500)]
         public int SweepToMssWindow { get; set; } = 40;
@@ -335,27 +431,34 @@ namespace ICTSMC
 
         [Display(GroupName = GrpSignal, Name = "PD tolerance (% of range around EQ)", Order = 842)]
         [Range(0, 50)]
-        public int PdTolerancePercent { get; set; } = 10;
+        public int PdTolerancePercent { get; set; } = 0;
+
+        [Display(GroupName = GrpSignal, Name = "Require confirmed external dealing range", Order = 843)]
+        public bool RequireConfirmedRangeForEntry { get; set; } = true;
 
         [Display(GroupName = GrpSignal, Name = "Opposite MSS cancels armed setup", Order = 845)]
         public bool CancelOnOppositeMss { get; set; } = true;
 
-        [Display(GroupName = GrpSignal, Name = "Failed MSS arms opposite side (trap entry)", Order = 847)]
-        public bool ArmOnFailedMss { get; set; } = true;
+        [Browsable(false)]
+        [Display(GroupName = GrpSignal, Name = "Deprecated V1 failed-MSS trap arm (ignored in V2)", Order = 847)]
+        public bool ArmOnFailedMss { get; set; } = false;
 
         [Display(GroupName = GrpSignal, Name = "Stop-loss buffer (ticks)", Order = 850)]
         [Range(0, 100)]
         public int SlBufferTicks { get; set; } = 4;
 
+        [Display(GroupName = GrpSignal, Name = "Base exit plan", Order = 855)]
+        public ExitPlan BaseExitPlan { get; set; } = ExitPlan.PartialAtTp2RunnerToTp3;
+
         [Display(GroupName = GrpSignal, Name = "C-tier continuation signals (Non-ICT)", Order = 860)]
-        public bool ContinuationSignalsEnabled { get; set; } = true;
+        public bool ContinuationSignalsEnabled { get; set; } = false;
 
         [Display(GroupName = GrpSignal, Name = "Continuation: max zone age (bars)", Order = 862)]
         [Range(1, 200)]
         public int ContinuationMaxAgeBars { get; set; } = 20;
 
         [Display(GroupName = GrpSignal, Name = "C-tier: allow counter-trend after same-side sweep (inversion reversal)", Order = 864)]
-        public bool ContinuationAfterSweep { get; set; } = true;
+        public bool ContinuationAfterSweep { get; set; } = false;
 
         #endregion
 
@@ -446,20 +549,49 @@ namespace ICTSMC
             {
                 // A new bar index means every bar before it is final.
                 if (_lastSeenBar >= 0)
-                    OnBarComplete(_lastSeenBar);
+                {
+                    if (_lastSeenBar >= 1 && _lastPathProcessedBar != _lastSeenBar)
+                    {
+                        ProcessOhlcObservation(_lastSeenBar);
+                        _lastPathProcessedBar = _lastSeenBar;
+                        _lastObservedPrice = GetCandle(_lastSeenBar).Close;
+                        _lastObservedPriceBar = _lastSeenBar;
+                    }
+
+                    OnBarComplete(_lastSeenBar, bar);
+                }
 
                 _lastSeenBar = bar;
             }
-            else
-            {
-                // Repeated calls on the same bar index only happen with live ticks.
-                _realtime = true;
-            }
-
             // Intrabar engine: touches, sweeps, mitigations and entry signals are
             // evaluated on EVERY tick of the developing candle — price often reacts
             // the moment a zone is tapped, so we never wait for the close.
-            ProcessIntrabar(bar);
+            if (_initialCalculationComplete && bar == CurrentBar - 1)
+            {
+                _realtime = true;
+                ProcessIntrabar(bar, value);
+                _lastPathProcessedBar = bar;
+            }
+        }
+
+        /// <summary>
+        /// ATAS exposes an explicit recalculation lifecycle but no direct
+        /// historical/realtime flag. The finish callback is therefore the phase
+        /// boundary: all preceding one-shot bars are historical; thereafter the
+        /// current bar is processed as ordered live observations.
+        /// </summary>
+        protected override void OnRecalculate()
+        {
+            _initialCalculationComplete = false;
+            _lastPathProcessedBar = -1;
+            base.OnRecalculate();
+        }
+
+        protected override void OnFinishRecalculate()
+        {
+            base.OnFinishRecalculate();
+            _initialCalculationComplete = true;
+            FlushJournalBuffers();
         }
 
         private void ResetState()
@@ -469,19 +601,36 @@ namespace ICTSMC
             _swingLows.Clear();
             _liquidity.Clear();
             _structure.Clear();
+            _liquidityEvents.Clear();
+            _externalSwingHighs.Clear();
+            _externalSwingLows.Clear();
+            _externalStructure.Clear();
             _htfAggregators.Clear();
             _barDeltaCounts.Clear();
             _barDeltaSamples.Clear();
             _htfConfigured = false;
+            _htfSyntheticUnsafe = false;
             _htfInfo = "";
             _chartTfLabel = "";
             _lastSwingHigh = null;
             _lastSwingLow = null;
+            _lastExternalSwingHigh = null;
+            _lastExternalSwingLow = null;
             _trend = 0;
+            _externalTrend = 0;
             _atr = 0m;
             _atrSeeded = false;
             _lastSeenBar = 0;
             _realtime = false;
+            _initialCalculationComplete = false;
+            _lastPathProcessedBar = -1;
+            _lastObservedPrice = null;
+            _lastObservedPriceBar = -1;
+            _observationSequence = 0;
+            _nextLiquidityId = 0;
+            _nextLiquidityEventId = 0;
+            _nextStrictSetupId = 0;
+            _nextStructureEventId = 0;
             _pendingBullSweepBar = -1;
             _pendingBearSweepBar = -1;
             _armedBullUntil = -1;
@@ -490,13 +639,15 @@ namespace ICTSMC
             _armedBearAtBar = -1;
             _armedBullSource = "";
             _armedBearSource = "";
+            _bullStrictSetup = null;
+            _bearStrictSetup = null;
             _legDirection = 0;
             _legAnchor = null;
             _legExtreme = null;
             InitJournalSession();
         }
 
-        private decimal TickSize => InstrumentInfo?.TickSize ?? 0.01m;
+        private new decimal TickSize => InstrumentInfo?.TickSize ?? 0.01m;
 
         private string FormatPrice(decimal price)
         {

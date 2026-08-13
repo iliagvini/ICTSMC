@@ -63,6 +63,68 @@ namespace ICTSMC
         FullRange
     }
 
+    /// <summary>Final disposition of a crossed liquidity pool.</summary>
+    public enum LiquidityDisposition
+    {
+        TakenPendingClose,
+        ConfirmedTrap,
+        Run,
+        Indeterminate,
+        Expired
+    }
+
+    /// <summary>Strict sweep-to-MSS setup lifecycle.</summary>
+    public enum SetupStatus
+    {
+        AwaitingMss,
+        Armed,
+        Consumed,
+        Invalidated,
+        Expired
+    }
+
+    /// <summary>Whether a structure event is execution/internal or directional/external.</summary>
+    public enum StructureScope
+    {
+        Internal,
+        External
+    }
+
+    /// <summary>How a signal could be filled by the available market data.</summary>
+    public enum SignalFillStatus
+    {
+        SignalOnly,
+        Filled,
+        UnfilledGap,
+        AmbiguousOhlc,
+        Cancelled
+    }
+
+    /// <summary>Reliability of the market-event sequence used for a signal/outcome.</summary>
+    public enum MarketDataQuality
+    {
+        LiveOrderedObservations,
+        TickReplay,
+        OhlcApproximation
+    }
+
+    /// <summary>One explicit base exit model; analytics never infer it from a TP2 latch.</summary>
+    public enum ExitPlan
+    {
+        FullAtTp2,
+        FullAtTp3,
+        PartialAtTp2RunnerToTp3
+    }
+
+    internal enum ZoneContactKind
+    {
+        None,
+        EnteredFromExpectedSide,
+        AlreadyInside,
+        GapThrough,
+        OhlcPossible
+    }
+
     internal sealed class Zone
     {
         /// <summary>Stable id for journaling and audit.</summary>
@@ -73,7 +135,17 @@ namespace ICTSMC
         public string HtfLabel = "";
         /// <summary>Minutes of the HTF layer (0 for chart-TF zones). Drives confluence scoring.</summary>
         public int HtfMinutes;
+        /// <summary>
+        /// Visual origin. Rendering deliberately continues to use this field so V2
+        /// keeps the established chart presentation of V1.
+        /// </summary>
         public int StartBar;
+        /// <summary>Bar at which the zone became objectively valid.</summary>
+        public int ConfirmedBar;
+        /// <summary>First bar allowed to use the zone as a strict execution POI.</summary>
+        public int EligibleFromBar;
+        /// <summary>Structure break which validated this zone, where applicable.</summary>
+        public int? ConfirmingStructureBar;
         public decimal Top;
         public decimal Bottom;
         public ZoneState State = ZoneState.Active;
@@ -94,6 +166,16 @@ namespace ICTSMC
         public int LastTouchedBar = -1;
         /// <summary>Distinct touch episodes so far (1 = first presentation).</summary>
         public int TouchEpisodes;
+        /// <summary>First actual/possible presentation after confirmation.</summary>
+        public int? FirstPresentationBar;
+        public DateTime? FirstPresentationTime;
+        /// <summary>Last historical chart bar reconciled after late HTF construction.</summary>
+        public int HistoricalReconciledThroughBar = -1;
+        /// <summary>One strict execution attempt per zone; retests remain informational.</summary>
+        public bool CoreEntryConsumed;
+        /// <summary>Price contacted the source before it was valid as a tradeable POI.</summary>
+        public bool PreConfirmationTouched;
+        public string MitigationReason = "";
 
         public bool IsBullish => Type is ZoneType.BullOrderBlock or ZoneType.BullFvg or ZoneType.BullIfvg;
         public bool IsOrderBlock => Type is ZoneType.BullOrderBlock or ZoneType.BearOrderBlock;
@@ -128,6 +210,7 @@ namespace ICTSMC
 
     internal sealed class LiquidityLevel
     {
+        public int Id;
         public decimal Price;
         public int StartBar;
         /// <summary>true = buy-side liquidity resting above highs; false = sell-side below lows.</summary>
@@ -139,16 +222,52 @@ namespace ICTSMC
         public bool SweptAlerted;
         /// <summary>true = price closed back inside (classic sweep/trap), false = closed through (run).</summary>
         public bool? WasTrap;
+        public int? LiquidityEventId;
+    }
+
+    internal sealed class LiquidityEvent
+    {
+        public int Id;
+        public int LiquidityLevelId;
+        /// <summary>true means the trap would prime a long setup (SSL raid).</summary>
+        public bool LongSetup;
+        public bool BuySide;
+        public decimal Level;
+        public int TakenBar;
+        public DateTime TakenTime;
+        public decimal MaximumPenetration;
+        public LiquidityDisposition Disposition = LiquidityDisposition.TakenPendingClose;
+        public int? ClassifiedBar;
+    }
+
+    internal sealed class StrictSetup
+    {
+        public int Id;
+        public bool Long;
+        public int LiquidityEventId;
+        public int CreatedBar;
+        public int ArmedBar;
+        public int ExpiresBar;
+        public SetupStatus Status = SetupStatus.AwaitingMss;
+        public decimal RangeHigh;
+        public decimal RangeLow;
+        public int RangeHighBar;
+        public int RangeLowBar;
+        public readonly System.Collections.Generic.HashSet<int> EligiblePoiIds = new();
+        public int? MssStructureEventId;
+        public string InvalidationReason = "";
     }
 
     internal sealed class StructureEvent
     {
+        public int Id;
         public int Bar;
         public int FromBar;
         public decimal Level;
         public bool Bullish;
         /// <summary>true = Market Structure Shift (reversal), false = Break of Structure (continuation).</summary>
         public bool IsMss;
+        public StructureScope Scope = StructureScope.Internal;
     }
 
     /// <summary>
@@ -169,12 +288,18 @@ namespace ICTSMC
         public decimal ZoneTop;
         public decimal ZoneBottom;
         public decimal Entry;
+        public decimal PlannedEntry;
         public decimal Sl;
         public decimal Tp2;
         public decimal Tp3;
         public string PdStatus = "";
         public string Confluence = "";
         public int SignalBar;
+        public int FillBar;
+        public long FillSequence;
+        public SignalFillStatus FillStatus;
+        public MarketDataQuality DataQuality;
+        public ExitPlan ExitPlan;
         /// <summary>Id of the zone that triggered this signal (for invalidation alerts).</summary>
         public int TriggerZoneId;
 
@@ -199,12 +324,18 @@ namespace ICTSMC
         public bool PartialTaken;
         public bool PartialDone;
         public decimal PartialR;
+        /// <summary>Stop for the remaining position after an explicit partial exit.</summary>
+        public decimal RunnerStop;
+        /// <summary>Actual realized R for the selected base exit plan.</summary>
+        public decimal RealizedR;
 
         // Exit-warning latches: each threat class warns at most once per signal.
         public bool WarnedStructure;
         public bool WarnedZone;
 
         public decimal Risk => System.Math.Abs(Entry - Sl);
+        public bool IsAnalyticsEligible => FillStatus == SignalFillStatus.Filled && Resolved &&
+                                           DataQuality != MarketDataQuality.OhlcApproximation;
 
         public string ZoneFamily => TriggerType switch
         {
@@ -219,6 +350,7 @@ namespace ICTSMC
     {
         public DateTime BucketStart;
         public int FirstChartBar;
+        public int LastChartBar;
         public decimal Open;
         public decimal High;
         public decimal Low;
@@ -235,5 +367,12 @@ namespace ICTSMC
         public string Label;
         public readonly System.Collections.Generic.List<HtfCandle> Candles = new();
         public HtfCandle Current;
+        public decimal Atr;
+        public bool AtrSeeded;
+        public readonly System.Collections.Generic.List<SwingPoint> SwingHighs = new();
+        public readonly System.Collections.Generic.List<SwingPoint> SwingLows = new();
+        public SwingPoint LastSwingHigh;
+        public SwingPoint LastSwingLow;
+        public int Trend;
     }
 }
