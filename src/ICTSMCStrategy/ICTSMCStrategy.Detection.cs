@@ -128,9 +128,16 @@ namespace ICTSMC
         /// created an order block, re-anchored the dealing range and flipped the trend,
         /// none of which is a structure break in ICT terms. That is INTERNAL structure.
         ///
-        /// With protected swings on, the defended high is only replaced when the old one
-        /// has actually been broken, or when the new pivot is higher (in which case price
-        /// has already traded through the old one and it is no longer protecting anything).
+        /// With protected swings on, the defended high is only replaced WITHIN a leg when
+        /// the old one has actually been broken, or when the new pivot is higher (price
+        /// already traded through the old one, so it protects nothing).
+        ///
+        /// The leg boundary matters: on an opposite-direction break the counter-side pivot
+        /// is re-anchored to the most recent unbroken swing (see ReanchorCounterSide).
+        /// Without that, "keep the more extreme unbroken high" degenerates into "keep the
+        /// ALL-TIME high" — a bullish break would require taking out the highest high of
+        /// the entire series, so bullish structure, every MSS, and with it the whole armed
+        /// entry model could never fire.
         /// </summary>
         private void AdoptProtectedHigh(SwingPoint swing)
         {
@@ -288,6 +295,7 @@ namespace ICTSMC
                     IsMss = isMss
                 };
                 _structure.Add(evt);
+                ReanchorCounterSide(bullish: true);
                 AnchorLeg(evt);
                 OnStructureEvent(evt);
 
@@ -311,10 +319,40 @@ namespace ICTSMC
                     IsMss = isMss
                 };
                 _structure.Add(evt);
+                ReanchorCounterSide(bullish: false);
                 AnchorLeg(evt);
                 OnStructureEvent(evt);
 
                 CreateOrderBlock(bar, bullish: false);
+            }
+        }
+
+        /// <summary>
+        /// A structure break ends the previous leg, so the pivot the OPPOSITE side
+        /// defends is re-anchored to the most recent unbroken swing on that side —
+        /// the origin of the leg that just started. Breaking it later is the CHoCH
+        /// that flips the trend and produces an MSS.
+        ///
+        /// This is what keeps "protected swing" meaning *protected within the current
+        /// leg* rather than *the most extreme pivot ever seen*: without it a downtrend
+        /// pins the defended high at the all-time high and no bullish break can occur.
+        /// </summary>
+        private void ReanchorCounterSide(bool bullish)
+        {
+            if (!UseProtectedSwings)
+                return;
+
+            if (bullish)
+            {
+                var low = _swingLows.LastOrDefault(l => !l.Broken);
+                if (low != null)
+                    _lastSwingLow = low;
+            }
+            else
+            {
+                var high = _swingHighs.LastOrDefault(h => !h.Broken);
+                if (high != null)
+                    _lastSwingHigh = high;
             }
         }
 

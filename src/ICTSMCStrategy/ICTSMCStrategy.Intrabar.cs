@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
@@ -270,7 +271,7 @@ namespace ICTSMC
 
                     JournalEvent(evt.Bar, "Armed", "Bull", null, evt.Level,
                         $"Source={_armedBullSource}; TrapDepth={_armedBullTrapDepth}/{MaxTrapChainHops}; MssBar={evt.Bar}; " +
-                        $"SweepBar={(hadSweep ? _pendingBullSweepBar.ToString() : "none")}; " +
+                        $"SweepBar={(hadSweep ? _pendingBullSweepBar.ToString(CultureInfo.InvariantCulture) : "none")}; " +
                         $"SweepAge={(hadSweep ? $"{evt.Bar - _pendingBullSweepBar}/{SweepToMssWindow}" : "n/a")}; " +
                         $"ArmedUntil=bar {_armedBullUntil} (+{ArmWindowBars})");
                 }
@@ -333,7 +334,7 @@ namespace ICTSMC
 
                     JournalEvent(evt.Bar, "Armed", "Bear", null, evt.Level,
                         $"Source={_armedBearSource}; TrapDepth={_armedBearTrapDepth}/{MaxTrapChainHops}; MssBar={evt.Bar}; " +
-                        $"SweepBar={(hadSweep ? _pendingBearSweepBar.ToString() : "none")}; " +
+                        $"SweepBar={(hadSweep ? _pendingBearSweepBar.ToString(CultureInfo.InvariantCulture) : "none")}; " +
                         $"SweepAge={(hadSweep ? $"{evt.Bar - _pendingBearSweepBar}/{SweepToMssWindow}" : "n/a")}; " +
                         $"ArmedUntil=bar {_armedBearUntil} (+{ArmWindowBars})");
                 }

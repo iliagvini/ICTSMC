@@ -115,6 +115,20 @@ run two ATAS terminals polling the same bot — Telegram allows one listener per
 
 Requirements: .NET 10 SDK (ATAS X) or .NET 8 SDK (older ATAS Platform), ATAS installed.
 
+**One command (Windows)** — builds Release and drops `ICTSMCStrategy.dll` into the deploy
+folder (defaults to `%USERPROFILE%\Desktop\IliaICTSMC`):
+
+```bat
+build.cmd
+build.cmd "C:\Users\Ilia\Desktop\IliaICTSMC"
+build.cmd "C:\Users\Ilia\Desktop\IliaICTSMC" "C:\Program Files\ATAS X"
+```
+
+Then copy the DLL into `%USERPROFILE%\Documents\ATAS\Indicators`, restart ATAS, and add
+**ICT/SMC Strategy** from the *Order Flow* category.
+
+Manual equivalents:
+
 ```bash
 # ATAS X (default — targets net10.0-windows, probes "C:\Program Files\ATAS X" automatically)
 dotnet build src/ICTSMCStrategy/ICTSMCStrategy.csproj -c Release
