@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
@@ -270,7 +271,7 @@ namespace ICTSMC
 
                     JournalEvent(evt.Bar, "Armed", "Bull", null, evt.Level,
                         $"Source={_armedBullSource}; TrapDepth={_armedBullTrapDepth}/{MaxTrapChainHops}; MssBar={evt.Bar}; " +
-                        $"SweepBar={(hadSweep ? _pendingBullSweepBar.ToString() : "none")}; " +
+                        $"SweepBar={(hadSweep ? _pendingBullSweepBar.ToString(CultureInfo.InvariantCulture) : "none")}; " +
                         $"SweepAge={(hadSweep ? $"{evt.Bar - _pendingBullSweepBar}/{SweepToMssWindow}" : "n/a")}; " +
                         $"ArmedUntil=bar {_armedBullUntil} (+{ArmWindowBars})");
                 }
@@ -333,7 +334,7 @@ namespace ICTSMC
 
                     JournalEvent(evt.Bar, "Armed", "Bear", null, evt.Level,
                         $"Source={_armedBearSource}; TrapDepth={_armedBearTrapDepth}/{MaxTrapChainHops}; MssBar={evt.Bar}; " +
-                        $"SweepBar={(hadSweep ? _pendingBearSweepBar.ToString() : "none")}; " +
+                        $"SweepBar={(hadSweep ? _pendingBearSweepBar.ToString(CultureInfo.InvariantCulture) : "none")}; " +
                         $"SweepAge={(hadSweep ? $"{evt.Bar - _pendingBearSweepBar}/{SweepToMssWindow}" : "n/a")}; " +
                         $"ArmedUntil=bar {_armedBearUntil} (+{ArmWindowBars})");
                 }
@@ -606,7 +607,7 @@ namespace ICTSMC
                 ? matches.OrderByDescending(z => z.Top).First()
                 : matches.OrderBy(z => z.Bottom).First();
 
-            var buffer = SlBufferTicks * TickSize;
+            var buffer = SlBufferTicks * InstrumentTickSize;
             decimal entry, sl;
 
             if (longSide)
@@ -747,7 +748,7 @@ namespace ICTSMC
                 ? $"PD override: zone mid {FormatPrice(zone.Mid)} beyond EQ limit"
                 : "no sweep→MSS chain";
 
-            var buffer = SlBufferTicks * TickSize;
+            var buffer = SlBufferTicks * InstrumentTickSize;
             var entry = longSide ? zone.Top : zone.Bottom;
             var sl = longSide ? zone.Bottom - buffer : zone.Top + buffer;
             var risk = Math.Abs(entry - sl);

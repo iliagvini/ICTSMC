@@ -963,11 +963,19 @@ namespace ICTSMC
 
         #endregion
 
-        private decimal TickSize => InstrumentInfo?.TickSize ?? 0.01m;
+        /// <summary>
+        /// Instrument tick size with a safe fallback.
+        ///
+        /// Deliberately NOT named TickSize: the ATAS indicator base class already
+        /// exposes a TickSize member, and a same-named property here silently HID it
+        /// (CS0108). Hiding a base member by accident is how two different tick sizes
+        /// end up in play depending on which one a given call site happens to bind to.
+        /// </summary>
+        private decimal InstrumentTickSize => InstrumentInfo?.TickSize ?? 0.01m;
 
         private string FormatPrice(decimal price)
         {
-            var ts = TickSize;
+            var ts = InstrumentTickSize;
             var decimals = 0;
             while (ts != Math.Truncate(ts) && decimals < 10)
             {
