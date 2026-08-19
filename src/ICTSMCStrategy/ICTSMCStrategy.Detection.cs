@@ -664,6 +664,32 @@ namespace ICTSMC
                 if (zone.StartBar >= bar)
                     continue;
 
+                // HTF zones are judged on HTF candle bodies, in ApplyHtfBodyClose.
+                // Using the chart candle here meant a 4H gap could be inverted by a
+                // single 15-minute body close - 16 chances per 4H candle instead of one,
+                // and a transient dip a real 4H candle would have absorbed as a wick.
+                if (zone.IsHtf)
+                    continue;
+
+                ApplyBodyCloseToZone(zone, bodyLow, bodyHigh, bar, 3, flipped);
+            }
+
+            CommitFlippedZones(flipped, bar, "");
+
+            // Classify finished sweeps: close back inside = trap, close through = run.
+            foreach (var level in _liquidity.Where(l => l.Swept && l.SweptBar == bar && l.WasTrap == null))
+                level.WasTrap = level.BuySide ? candle.Close < level.Price : candle.Close > level.Price;
+        }
+
+        /// <summary>
+        /// Body-close semantics for one zone: BodyClose mitigation, FVG inversion and
+        /// order-block breakers. Shared by the chart-timeframe pass and the per-layer HTF
+        /// pass so both apply identical rules - the only difference is WHOSE candle body
+        /// is handed in.
+        /// </summary>
+        private void ApplyBodyCloseToZone(Zone zone, decimal bodyLow, decimal bodyHigh, int bar,
+            int flipWindowBars, List<Zone> flipped)
+        {
                 var rule = zone.IsOrderBlock ? ObMitigation : FvgMitigation;
                 if (zone.State != ZoneState.Mitigated && rule == MitigationRule.BodyClose)
                 {
@@ -678,7 +704,7 @@ namespace ICTSMC
                 // gap now, or within a few bars of a wick-based mitigation.
                 if (IfvgEnabled && !zone.Inverted &&
                     zone.Type is ZoneType.BullFvg or ZoneType.BearFvg &&
-                    (zone.State != ZoneState.Mitigated || (zone.EndBar.HasValue && bar - zone.EndBar.Value <= 3)))
+                    (zone.State != ZoneState.Mitigated || (zone.EndBar.HasValue && bar - zone.EndBar.Value <= flipWindowBars)))
                 {
                     if (zone.Type == ZoneType.BullFvg && bodyLow < zone.Bottom)
                     {
@@ -704,7 +730,7 @@ namespace ICTSMC
                 // entry model's trap-arming already assumes exists.
                 if (BreakerBlocksEnabled && !zone.BreakerSpawned &&
                     zone.Type is ZoneType.BullOrderBlock or ZoneType.BearOrderBlock &&
-                    (zone.State != ZoneState.Mitigated || (zone.EndBar.HasValue && bar - zone.EndBar.Value <= 3)))
+                    (zone.State != ZoneState.Mitigated || (zone.EndBar.HasValue && bar - zone.EndBar.Value <= flipWindowBars)))
                 {
                     if (zone.Type == ZoneType.BullOrderBlock && bodyLow < zone.Bottom)
                     {
@@ -723,22 +749,96 @@ namespace ICTSMC
                         flipped.Add(BuildFlip(zone, ZoneType.BullBreaker, bar));
                     }
                 }
-            }
+        }
 
+        /// <summary>Commits polarity flips produced by a body-close pass and journals them.</summary>
+        private void CommitFlippedZones(List<Zone> flipped, int bar, string layerNote)
+        {
             foreach (var zone in flipped)
             {
                 AddZone(zone);
 
                 var isBreaker = zone.Type is ZoneType.BullBreaker or ZoneType.BearBreaker;
                 JournalEvent(bar, isBreaker ? "ZoneBroken" : "ZoneInverted", zone.IsBullish ? "Bull" : "Bear", zone, 0m,
-                    isBreaker
-                        ? "Order block violated — flipped into a breaker"
-                        : "FVG flipped polarity (body close through)");
+                    (isBreaker
+                        ? "Order block violated - flipped into a breaker"
+                        : "FVG flipped polarity (body close through)") + layerNote);
+            }
+        }
+
+        /// <summary>How many chart candles make up one candle of this HTF layer.</summary>
+        private int BarsPerHtfCandle(HtfAggregator agg) =>
+            _chartMinutes > 0 ? Math.Max(1, agg.Minutes / _chartMinutes) : 1;
+
+        /// <summary>
+        /// Body-close pass for ONE higher-timeframe layer, run when that layer's candle
+        /// closes and judged on THAT candle's body.
+        ///
+        /// A 4H fair value gap is broken when a 4H candle body closes through it - not
+        /// when some 15-minute candle does. Running the chart-timeframe pass over HTF
+        /// zones gave a 4H gap sixteen inversion opportunities per 4H candle on an M15
+        /// chart, and let a brief dip that a real 4H candle would have absorbed as a wick
+        /// flip the zone permanently. That is why an M15 chart showed 4H iFVGs a genuine
+        /// H4 chart never produced.
+        /// </summary>
+        private void ApplyHtfBodyClose(HtfAggregator agg)
+        {
+            var n = agg.Candles.Count;
+            if (n == 0)
+                return;
+
+            var closed = agg.Candles[n - 1];
+            var bodyLow = Math.Min(closed.Open, closed.Close);
+            var bodyHigh = Math.Max(closed.Open, closed.Close);
+
+            // The "recently wick-mitigated" window is 3 candles OF THIS LAYER.
+            var flipWindow = 3 * BarsPerHtfCandle(agg);
+            var flipped = new List<Zone>();
+
+            foreach (var zone in _zones)
+            {
+                if (!zone.IsHtf || zone.HtfLabel != agg.Label)
+                    continue;
+
+                // Never judged by the candle it was born from.
+                if (zone.StartBar >= closed.FirstChartBar)
+                    continue;
+
+                ApplyBodyCloseToZone(zone, bodyLow, bodyHigh, _lastSeenBar, flipWindow, flipped);
             }
 
-            // Classify finished sweeps: close back inside = trap, close through = run.
-            foreach (var level in _liquidity.Where(l => l.Swept && l.SweptBar == bar && l.WasTrap == null))
-                level.WasTrap = level.BuySide ? candle.Close < level.Price : candle.Close > level.Price;
+            CommitFlippedZones(flipped, _lastSeenBar, $" [{agg.Label} candle close]");
+        }
+
+        /// <summary>
+        /// The HTF equivalent of LegHasImbalance: the displacement leg on the HTF series
+        /// must itself have left an unfilled 3-candle gap.
+        /// </summary>
+        private bool HtfLegHasImbalance(List<HtfCandle> candles, int obIndex, int lastIndex, bool bullish)
+        {
+            var minGap = MinFvgTicks * InstrumentTickSize;
+
+            for (var b = obIndex + 2; b <= lastIndex; b++)
+            {
+                if (b - 2 < 0)
+                    continue;
+
+                var a = candles[b - 2];
+                var c = candles[b];
+
+                if (bullish)
+                {
+                    if (c.Low > a.High && c.Low - a.High >= minGap)
+                        return true;
+                }
+                else
+                {
+                    if (c.High < a.Low && a.Low - c.High >= minGap)
+                        return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>A flipped copy of <paramref name="source"/> covering the same territory.</summary>
@@ -777,14 +877,34 @@ namespace ICTSMC
             }
         }
 
+        /// <summary>
+        /// How long a mitigated zone stays in the data. HTF zones are retained for at least
+        /// four candles OF THEIR OWN LAYER, so the layer's body-close pass can still reach
+        /// them (flip window is three).
+        /// </summary>
+        private int MitigatedRetentionBars(Zone zone)
+        {
+            if (!zone.IsHtf || zone.HtfMinutes <= 0 || _chartMinutes <= 0)
+                return KeepMitigatedBars;
+
+            var barsPerHtfCandle = Math.Max(1, zone.HtfMinutes / _chartMinutes);
+            return Math.Max(KeepMitigatedBars, 4 * barsPerHtfCandle);
+        }
+
         private void Prune(int bar)
         {
             // Mitigated zones vanish from RENDERING immediately (unless ShowMitigated),
             // but stay in the data for KeepMitigatedBars — the iFVG/breaker engine needs
-            // the broken zone for its 3-bar flip window, and the journal needs the id.
+            // the broken zone for its flip window, and the journal needs the id.
+            //
+            // HTF zones need a LONGER stay, measured in their own candles. KeepMitigatedBars
+            // is counted in CHART bars: on an M15 chart that is 10 bars = 2.5 hours, while a
+            // 4H candle only closes every 16 bars. A filled 4H gap was therefore pruned
+            // before its own layer's candle had a chance to close on it, so it could never
+            // invert and 4H iFVGs simply never appeared.
             _zones.RemoveAll(z =>
                 z.State == ZoneState.Mitigated &&
-                bar - (z.EndBar ?? bar) > KeepMitigatedBars);
+                bar - (z.EndBar ?? bar) > MitigatedRetentionBars(z));
 
             if (_structure.Count > 150)
                 _structure.RemoveRange(0, _structure.Count - 150);
@@ -953,6 +1073,7 @@ namespace ICTSMC
             _htfAggregators.Clear();
 
             var chartMinutes = EstimateChartMinutes(out var regular, out var approx, out var chartSeconds);
+            _chartMinutes = chartMinutes;
             var layers = new List<int>();
 
             if (HtfMode == HtfSelectionMode.Manual)
@@ -999,7 +1120,14 @@ namespace ICTSMC
         /// </summary>
         private DateTime GetBucketStart(DateTime time, int minutes)
         {
-            var anchorTicks = minutes >= 1440 ? TimeSpan.FromMinutes(DailyAnchorMinutes).Ticks : 0L;
+            // The anchor applies to EVERY layer, not just daily and above. Intraday HTF
+            // buckets were hard-anchored to midnight, so on a session-based instrument
+            // (futures opening 18:00) the synthetic 4H candles sat 2 hours out of phase
+            // with the platform's own H4 candles - different candles, therefore a
+            // completely different set of 4H gaps. Measured: a 2-hour phase shift changes
+            // 100% of the detected 4H FVG boundaries. Anchor 0 (default) = midnight,
+            // which is exactly the previous behaviour.
+            var anchorTicks = TimeSpan.FromMinutes(DailyAnchorMinutes).Ticks;
             var span = TimeSpan.FromMinutes(minutes).Ticks;
             var shifted = time.Ticks - anchorTicks;
 
@@ -1047,6 +1175,11 @@ namespace ICTSMC
         {
             var candles = agg.Candles;
             var n = candles.Count;
+
+            // First the candle that just closed settles accounts with existing zones of
+            // this layer, THEN it is allowed to mint new ones - so a zone can never be
+            // invalidated by the very candle that created it.
+            ApplyHtfBodyClose(agg);
 
             if (HtfFvgEnabled && n >= 3)
             {
@@ -1104,6 +1237,11 @@ namespace ICTSMC
                         var isOpposite = bullish ? c.Close < c.Open : c.Close > c.Open;
                         if (!isOpposite)
                             continue;
+
+                        // Same velocity proof the chart-timeframe rule demands: distance
+                        // alone is not displacement, the leg must have left a gap behind.
+                        if (RequireImbalanceForOb && !HtfLegHasImbalance(candles, i, n - 1, bullish))
+                            break;
 
                         AddZone(new Zone
                         {

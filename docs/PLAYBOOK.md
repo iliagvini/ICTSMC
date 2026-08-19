@@ -309,12 +309,21 @@ remains available.
 
 ### 7.3 Aggregation correctness guarantees
 
-- HTF candles are built by truncating candle open-times from **absolute ticks** — a 4H
-  bucket always starts 00/04/08/12/16/20, daily at midnight, weekly Monday 00:00 (.NET
-  tick zero is a Monday). Zero drift by construction.
-- `DailyAnchorMinutes` shifts daily+ buckets to a futures session open (e.g. 1080 =
-  18:00 platform time) so "daily" zones match the exchange session, not calendar
-  midnight.
+- HTF candles are built by truncating candle open-times from **absolute ticks**, so a
+  layer never drifts. With the default anchor of 0 a 4H bucket starts 00/04/08/12/16/20,
+  daily at midnight, weekly Monday 00:00 (.NET tick zero is a Monday).
+- **The session anchor applies to EVERY layer, not just daily and above.** This matters
+  more than it sounds. Bucket *phase* is not a detail: measured on identical price data,
+  shifting the 4H buckets by two hours changed **100% of the detected 4H FVG
+  boundaries** — same prices, same rules, a completely different set of gaps. A
+  session-based instrument (futures opening 18:00) whose HTF layers are hard-anchored to
+  midnight therefore produces 4H zones that do not exist on the platform's own H4 chart.
+  Set `Session anchor` so the synthetic buckets line up with your platform's HTF candles.
+
+  **How to find your value:** open the HTF chart, read any candle's open time, convert to
+  minutes after midnight, and take it modulo the layer size. H4 candles opening at
+  01:00/05:00/09:00… → `60 mod 240` = **60**. Candles opening on the even 4-hour marks →
+  **0** (the default).
 - On configuration the aggregators are **retro-fed the entire loaded history**, making
   HTF zones *path-independent*: identical whether the chart was just opened or watched
   live all day.
@@ -322,7 +331,29 @@ remains available.
 - The **on-chart badge** (`HTF auto: 4H + D · chart 1H`) makes the selection verifiable
   at a glance after every timeframe switch.
 
-### 7.4 HTF detection
+### 7.4 Body-close semantics belong to the layer
+
+An HTF zone is judged on ITS OWN candle bodies. A 4H fair value gap is broken when a 4H
+candle body closes through it — not when some 15-minute candle does. Running the
+chart-timeframe body-close pass over HTF zones gave a 4H gap sixteen inversion
+opportunities per 4H candle on an M15 chart, and let a brief dip that a real 4H candle
+would have absorbed as a wick flip the zone permanently. Each layer now settles accounts
+with its own zones when its candle closes, before that candle is allowed to mint new ones.
+
+*Wick*-based mitigation (`FullFill`, `Midline`, `AnyTouch`) deliberately stays on chart
+bars: those are price-level tests, and "price traded through X" is timeframe-independent —
+detecting it immediately is the point of the intrabar engine. Only body-close semantics
+are timeframe-dependent.
+
+Mitigated HTF zones are also retained for at least four candles **of their own layer**
+rather than `KeepMitigatedBars` chart bars, or a filled 4H gap would be pruned before its
+own candle ever closed on it and could never invert.
+
+**Verified:** on identical price data, an M15 chart with a 4H layer now reproduces a native
+4H chart's fair value gaps exactly — 16 of 16 with identical boundaries — and every iFVG
+the native chart produces, with identical boundaries.
+
+### 7.5 HTF detection
 
 The *same* FVG rule runs on the synthetic HTF series, with its noise filter scaled to
 **that layer's own average range** — never the chart-TF ATR. Measuring a 4H gap against
@@ -330,9 +361,17 @@ The *same* FVG rule runs on the synthetic HTF series, with its noise filter scal
 FVG"; and because HTF zones drive the A+/A++ tier, that inflated the very tiering the
 analytics exist to compare.
 
-HTF order blocks need **both** displacement *and* a structure break, mirroring the
-chart-TF rule: the candle's range ≥ `HtfDisplacementFactor` × its 10-candle average
-**and** its close beyond the prior `HtfStructureLookback` candles' extreme. Size alone
+HTF order blocks need displacement, a structure break, **and** an imbalance in the leg —
+the same three-part proof the chart-TF rule demands: the candle's range ≥
+`HtfDisplacementFactor` × its 10-candle average, its close beyond the prior
+`HtfStructureLookback` candles' extreme, and a 3-candle gap left behind in the leg.
+
+**Known divergence:** even so, HTF order blocks are detected by a *displacement proxy*,
+while chart-TF order blocks come from the full swing/BoS structure engine, which is not
+run on the synthetic HTF series. So a `4H OB` drawn on an M15 chart is not guaranteed to
+be an `OB` a native H4 chart would draw — on test data the proxy produced roughly twice as
+many. Fair value gaps, which are purely geometric, match exactly; order blocks are the
+one family where the two paths can legitimately disagree. Size alone
 qualified before — and a wide-range HTF candle is very often a *reversal* (an engulfing
 top, a news spike), whose "last opposite candle" is not an institutional origin block
 at all.

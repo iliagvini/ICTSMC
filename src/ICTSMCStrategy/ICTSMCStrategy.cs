@@ -59,6 +59,8 @@ namespace ICTSMC
         private bool _htfConfigured;
         private string _htfInfo = "";
         private string _chartTfLabel = "";
+        /// <summary>Measured chart timeframe in minutes; scales HTF-relative windows.</summary>
+        private int _chartMinutes;
 
         // Previous-session liquidity (PDH/PDL/PWH/PWL) bookkeeping.
         private DateTime _currentDayBucket = DateTime.MinValue;
@@ -455,7 +457,7 @@ namespace ICTSMC
             set => Set(ref _autoSecondLayer, value);
         }
 
-        [Display(GroupName = GrpHtf, Name = "Daily+ anchor (minutes after midnight)", Order = 714)]
+        [Display(GroupName = GrpHtf, Name = "Session anchor for ALL HTF layers (minutes after midnight)", Order = 714)]
         [Range(0, 1439)]
         public int DailyAnchorMinutes
         {
@@ -795,6 +797,7 @@ namespace ICTSMC
             _htfConfigured = false;
             _htfInfo = "";
             _chartTfLabel = "";
+            _chartMinutes = 0;
             _currentDayBucket = DateTime.MinValue;
             _currentWeekBucket = DateTime.MinValue;
             _dayHigh = _dayLow = _weekHigh = _weekLow = 0m;
