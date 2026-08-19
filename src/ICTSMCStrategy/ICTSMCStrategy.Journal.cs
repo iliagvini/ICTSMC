@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace ICTSMC
@@ -14,8 +15,8 @@ namespace ICTSMC
     ///
     /// Everything the engine does is written to CSV files so the live system can be
     /// audited after the fact:
-    ///  • events.csv    — zone lifecycle (created / touched / mitigated / inverted),
-    ///                    liquidity sweeps, BoS/MSS, failed MSS
+    ///  • events.csv    — zone lifecycle (created / touched / mitigated / inverted /
+    ///                    broken), liquidity sweeps, session levels, BoS/MSS, failed MSS
     ///  • signals.csv   — every entry-model signal with its full trade plan
     ///  • outcomes.csv  — resolution of each signal: SL / TP2 / TP3 / Timeout,
     ///                    R-multiple, MAE/MFE in R, bars held, plus two shadow
@@ -53,6 +54,10 @@ namespace ICTSMC
         [Range(10, 2000)]
         public int SignalTimeoutBars { get; set; } = 100;
 
+        [Display(GroupName = GrpJournal, Name = "Analytics: max resolved signals retained", Order = 1125)]
+        [Range(100, 100000)]
+        public int AnalyticsMaxSignals { get; set; } = 5000;
+
         #endregion
 
         #region State
@@ -70,6 +75,16 @@ namespace ICTSMC
 
         private readonly List<SignalRecord> _openSignals = new();
         private readonly List<SignalRecord> _resolvedSignals = new();
+
+        // Analytics rewrite coalescing. Recomputing eight groupings over the whole
+        // resolved pool on the chart thread after EVERY resolution was O(n) per
+        // signal and O(n²) per session; the pool itself was unbounded. Now the
+        // chart thread only takes a bounded snapshot, and at most one rewrite is in
+        // flight at a time — later resolutions during a burst simply refresh the
+        // snapshot that the queued rewrite will pick up.
+        private SignalRecord[] _analyticsSnapshot = Array.Empty<SignalRecord>();
+        private int _analyticsPending;
+        private int _analyticsTrimmed;
 
         private string _sessionStamp = "";
         // Stable per-chart-instance suffix baked into the session stamp: two charts
@@ -101,6 +116,11 @@ namespace ICTSMC
 
             _openSignals.Clear();
             _resolvedSignals.Clear();
+            _analyticsSnapshot = Array.Empty<SignalRecord>();
+            Interlocked.Exchange(ref _analyticsPending, 0);
+            _analyticsTrimmed = 0;
+            _kzRejectBullBar = -1;
+            _kzRejectBearBar = -1;
             _journalInstanceId ??= Guid.NewGuid().ToString("N")[..4];
             _sessionStamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture)
                             + "-" + _journalInstanceId;
@@ -124,11 +144,16 @@ namespace ICTSMC
             }
         }
 
+        /// <summary>
+        /// RFC-4180 quoting. Carriage returns matter as much as line feeds: a lone CR
+        /// inside a value (Windows text pasted into an instrument alias, for instance)
+        /// silently split the row for every downstream CSV reader.
+        /// </summary>
         private static string Csv(string value)
         {
             if (string.IsNullOrEmpty(value))
                 return "";
-            if (value.Contains(',') || value.Contains('"') || value.Contains('\n'))
+            if (value.Contains(',') || value.Contains('"') || value.Contains('\n') || value.Contains('\r'))
                 return "\"" + value.Replace("\"", "\"\"") + "\"";
             return value;
         }
@@ -290,6 +315,15 @@ namespace ICTSMC
         /// Runs on every COMPLETED bar: updates MAE/MFE for open signals and resolves
         /// them. Resolution is deliberately conservative: if a bar touches both the
         /// stop and a target, the stop is assumed to have been hit first.
+        ///
+        /// The SIGNAL BAR is included. Skipping it (the previous behaviour) meant the
+        /// interval between the intrabar tick that fired the signal and that candle's
+        /// close — the single most adverse stretch of a tap-and-fail — was invisible:
+        /// MAE was systematically understated and a same-bar stop-out was never
+        /// recorded as one, so it resolved later as a timeout or even a win. Because
+        /// the signal fires intrabar, the candle's extremes AT THAT INSTANT are
+        /// captured on the record, and only excursion beyond them counts as the
+        /// trade's own.
         /// </summary>
         private void UpdateOpenSignals(int bar)
         {
@@ -301,25 +335,38 @@ namespace ICTSMC
             for (var i = _openSignals.Count - 1; i >= 0; i--)
             {
                 var s = _openSignals[i];
-                if (bar <= s.SignalBar)
+                if (bar < s.SignalBar)
                     continue;
 
-                if (s.Long)
+                decimal high, low;
+                if (bar == s.SignalBar)
                 {
-                    s.Mfe = Math.Max(s.Mfe, candle.High - s.Entry);
-                    s.Mae = Math.Max(s.Mae, s.Entry - candle.Low);
+                    // Pre-entry price action on the signal bar is not the trade's.
+                    high = candle.High > s.HighAtSignal ? candle.High : s.Entry;
+                    low = candle.Low < s.LowAtSignal ? candle.Low : s.Entry;
                 }
                 else
                 {
-                    s.Mfe = Math.Max(s.Mfe, s.Entry - candle.Low);
-                    s.Mae = Math.Max(s.Mae, candle.High - s.Entry);
+                    high = candle.High;
+                    low = candle.Low;
                 }
 
-                var slHit = s.Long ? candle.Low <= s.Sl : candle.High >= s.Sl;
-                var tp3Hit = s.Long ? candle.High >= s.Tp3 : candle.Low <= s.Tp3;
-                var tp2Hit = s.Long ? candle.High >= s.Tp2 : candle.Low <= s.Tp2;
+                if (s.Long)
+                {
+                    s.Mfe = Math.Max(s.Mfe, high - s.Entry);
+                    s.Mae = Math.Max(s.Mae, s.Entry - low);
+                }
+                else
+                {
+                    s.Mfe = Math.Max(s.Mfe, s.Entry - low);
+                    s.Mae = Math.Max(s.Mae, high - s.Entry);
+                }
 
-                UpdateShadowManagement(s, candle.High, candle.Low, slHit, tp2Hit, tp3Hit);
+                var slHit = s.Long ? low <= s.Sl : high >= s.Sl;
+                var tp3Hit = s.Long ? high >= s.Tp3 : low <= s.Tp3;
+                var tp2Hit = s.Long ? high >= s.Tp2 : low <= s.Tp2;
+
+                UpdateShadowManagement(s, high, low, slHit, tp2Hit, tp3Hit);
 
                 if (slHit)
                 {
@@ -448,12 +495,16 @@ namespace ICTSMC
         ///  1. opposing structure — a BoS/MSS printed against the trade this bar;
         ///  2. opposing pattern  — displacement against the position just carved a
         ///     fresh opposing zone (StartBar within the last bar).
-        /// Warnings are journaled (HIST and LIVE) so their predictive value is
-        /// measurable later; the 🚨 alert itself is realtime-gated as usual.
+        ///
+        /// Warnings are ALWAYS journaled (HIST and LIVE) so their predictive value is
+        /// measurable later; only the 🚨 alert itself honours AlertOnExitWarning. The
+        /// previous guard sat on the whole method, so silencing the notification also
+        /// silenced the data that would have told you whether the notification was
+        /// worth keeping.
         /// </summary>
         private void CheckOpenSignalThreats(int bar)
         {
-            if (!AlertOnExitWarning || _openSignals.Count == 0)
+            if (_openSignals.Count == 0)
                 return;
 
             var candle = GetCandle(bar);
@@ -489,7 +540,6 @@ namespace ICTSMC
                             $"fresh opposing {opp.Tag} carved at {FormatPrice(opp.Bottom)}–{FormatPrice(opp.Top)}");
                     }
                 }
-
             }
         }
 
@@ -502,6 +552,9 @@ namespace ICTSMC
 
             JournalEvent(bar, "ExitWarning", s.Long ? "Bull" : "Bear", null, close,
                 $"signal #{s.Id} ({s.Tier} {s.ArmSource} {s.TriggerTag}); entry {Num(s.Entry)}; unrealized {rTxt}; {reason}");
+
+            if (!AlertOnExitWarning)
+                return;
 
             Fire($"🚨 EXIT WARNING — open {(s.Long ? "LONG" : "SHORT")} (signal #{s.Id}, {s.Tier}) under threat\n" +
                  $"📍 Entry {FormatPrice(s.Entry)} · now {FormatPrice(close)} ({rTxt})\n" +
@@ -545,7 +598,10 @@ namespace ICTSMC
             // A backfill-fired signal can resolve during live ticks; its signal row
             // was never journaled, so skip the outcome too — no orphan ids.
             if (JournalLiveOnly && !s.Live)
+            {
+                RequestAnalytics();
                 return;
+            }
 
             var maeR = risk > 0 ? s.Mae / risk : 0m;
             var mfeR = risk > 0 ? s.Mfe / risk : 0m;
@@ -569,7 +625,7 @@ namespace ICTSMC
                 Csv(s.Layer));
 
             JournalWrite("outcomes.csv", OutcomesHeader, line);
-            WriteAnalytics();
+            RequestAnalytics();
         }
 
         #endregion
@@ -577,24 +633,67 @@ namespace ICTSMC
         #region Analytics
 
         /// <summary>
-        /// Rewrites the aggregated performance file after every resolution.
-        /// Win rate = TP2+ resolutions ÷ (wins + SL losses); timeouts are excluded
-        /// from win rate but included in expectancy (AvgR).
+        /// Queues an analytics rewrite. The chart thread only bounds the pool and takes
+        /// a shallow snapshot; grouping, formatting and the file write all happen on the
+        /// serialized IO chain, and concurrent requests coalesce into one write.
         /// </summary>
-        private void WriteAnalytics()
+        private void RequestAnalytics()
         {
             if (!JournalEnabled)
                 return;
 
+            // Bound the retained pool: it used to grow for the entire session while
+            // every resolution re-grouped all of it.
+            var cap = Math.Max(100, AnalyticsMaxSignals);
+            if (_resolvedSignals.Count > cap)
+            {
+                var excess = _resolvedSignals.Count - cap;
+                _resolvedSignals.RemoveRange(0, excess);
+                _analyticsTrimmed += excess;
+            }
+
             // Analytics must mirror what outcomes.csv contains: in LIVE-only mode
             // that means live-fired signals exclusively.
             var pool = JournalLiveOnly
-                ? _resolvedSignals.Where(s => s.Live).ToList()
-                : _resolvedSignals;
+                ? _resolvedSignals.Where(s => s.Live).ToArray()
+                : _resolvedSignals.ToArray();
 
-            if (pool.Count == 0)
+            if (pool.Length == 0)
                 return;
 
+            var trimmed = _analyticsTrimmed;
+            Volatile.Write(ref _analyticsSnapshot, pool);
+
+            // One rewrite in flight at a time; a burst refreshes the snapshot instead
+            // of queueing a full recomputation per signal.
+            if (Interlocked.Exchange(ref _analyticsPending, 1) == 1)
+                return;
+
+            // JournalDir touches InstrumentInfo, so the path is resolved here on the
+            // chart thread rather than inside the background task.
+            var path = Path.Combine(JournalDir, $"{_sessionStamp}-analytics.csv");
+
+            EnqueueIo(() =>
+            {
+                Interlocked.Exchange(ref _analyticsPending, 0);
+
+                var snapshot = Volatile.Read(ref _analyticsSnapshot);
+                if (snapshot.Length == 0)
+                    return;
+
+                var text = BuildAnalytics(snapshot, trimmed);
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.WriteAllText(path, text);
+            });
+        }
+
+        /// <summary>
+        /// Aggregated performance report.
+        /// Win rate = TP2+ resolutions ÷ (wins + SL losses); timeouts are excluded
+        /// from win rate but included in expectancy (AvgR).
+        /// </summary>
+        private static string BuildAnalytics(IReadOnlyList<SignalRecord> pool, int trimmed)
+        {
             var sb = new StringBuilder();
             sb.AppendLine("GroupBy,Key,Signals,Wins,Losses,Timeouts,WinRatePct,AvgR,AvgBE1R_R,AvgPartial2R_R,AvgMAE_R,AvgMFE_R");
 
@@ -607,19 +706,17 @@ namespace ICTSMC
             AppendGroup(sb, pool, "Family+Layer", s => $"{s.ZoneFamily}/{s.Layer}");
             AppendGroup(sb, pool, "ALL", _ => "ALL");
 
-            var path = Path.Combine(JournalDir, $"{_sessionStamp}-analytics.csv");
-            var text = sb.ToString();
+            if (trimmed > 0)
+                sb.AppendLine($"# note,{trimmed} oldest resolved signals were trimmed from the in-memory pool " +
+                              "(raise \"Analytics: max resolved signals retained\" to keep more); outcomes.csv remains complete");
 
-            EnqueueIo(() =>
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(path));
-                File.WriteAllText(path, text);
-            });
+            return sb.ToString();
         }
 
-        private void AppendGroup(StringBuilder sb, List<SignalRecord> pool, string groupName, Func<SignalRecord, string> selector)
+        private static void AppendGroup(StringBuilder sb, IReadOnlyList<SignalRecord> pool, string groupName,
+            Func<SignalRecord, string> selector)
         {
-            foreach (var group in pool.GroupBy(selector).OrderBy(g => g.Key))
+            foreach (var group in pool.GroupBy(selector).OrderBy(g => g.Key, StringComparer.Ordinal))
             {
                 var total = group.Count();
                 var wins = group.Count(s => s.Outcome is "TP2" or "TP3");
