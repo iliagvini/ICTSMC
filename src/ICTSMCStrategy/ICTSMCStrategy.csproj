@@ -33,4 +33,18 @@
     </Reference>
   </ItemGroup>
 
+  <!--
+    Without this, a missing/mislocated ATAS install produces hundreds of
+    "The type or namespace name 'ATAS' could not be found" errors that say nothing
+    about the actual cause. Fail once, clearly, with the fix.
+  -->
+  <Target Name="VerifyAtasReferences" BeforeTargets="BeforeBuild">
+    <Message Importance="high"
+             Text="ICTSMC: ATAS folder = '$(AtasPath)'  |  TargetFramework = $(TargetFramework)" />
+    <Error Condition="!Exists('$(AtasPath)\ATAS.Indicators.dll')"
+           Text="ATAS.Indicators.dll was not found in '$(AtasPath)'.%0A%0AThis project must be built on a machine where ATAS is installed - it links against the ATAS assemblies.%0A%0AFix: pass your ATAS folder explicitly, e.g.%0A    dotnet build src/ICTSMCStrategy/ICTSMCStrategy.csproj -c Release -p:AtasPath=&quot;C:\Program Files\ATAS X&quot;%0A%0AThe folder is the one containing ATAS.Indicators.dll and OFT.Rendering.dll (next to OFT.Platform.exe)." />
+    <Error Condition="!Exists('$(AtasPath)\OFT.Rendering.dll')"
+           Text="OFT.Rendering.dll was not found in '$(AtasPath)'.%0A%0AATAS.Indicators.dll resolved but OFT.Rendering.dll did not, so '$(AtasPath)' is probably not the real ATAS program folder.%0A%0AFix: point -p:AtasPath=... at the folder that contains BOTH DLLs." />
+  </Target>
+
 </Project>
