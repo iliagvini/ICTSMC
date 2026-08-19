@@ -13,6 +13,39 @@ namespace ICTSMC
             Timeout = TimeSpan.FromSeconds(10)
         };
 
+        // Killzone rejections are journaled at most once per bar per side.
+        private int _kzRejectBullBar = -1;
+        private int _kzRejectBearBar = -1;
+
+        #region Zone contact geometry
+
+        /// <summary>
+        /// True when the candle's range actually OVERLAPS the zone.
+        ///
+        /// The previous one-sided test (`low &lt;= top` for a bullish zone) stayed true
+        /// for as long as price was anywhere BELOW the zone — including far below it.
+        /// For FVGs that self-healed, because FullFill mitigation kills the zone in the
+        /// same pass; for ORDER BLOCKS it did not, because BodyClose mitigation can only
+        /// be judged on a finalized candle. So while price sliced down through a bullish
+        /// OB, the block still counted as "touched" and the entry model could fire a
+        /// LONG whose quoted entry sat above the market and whose stop price had already
+        /// traded. A range overlap is the correct contact test in both directions.
+        /// </summary>
+        private static bool ZoneInContact(Zone zone, decimal high, decimal low) =>
+            low <= zone.Top && high >= zone.Bottom;
+
+        /// <summary>
+        /// True when price actually traded THROUGH the zone's proximal edge on this
+        /// bar — the edge the trade plan quotes as its entry. This is stricter than
+        /// mere contact and is what an entry signal requires: it proves price returned
+        /// into the zone from the correct side rather than being parked beyond it.
+        /// </summary>
+        private static bool EntryEdgeTraded(Zone zone, decimal high, decimal low) => zone.IsBullish
+            ? high >= zone.Top && low <= zone.Top
+            : low <= zone.Bottom && high >= zone.Bottom;
+
+        #endregion
+
         #region Intrabar reaction engine
 
         /// <summary>
@@ -42,6 +75,7 @@ namespace ICTSMC
 
                 level.Swept = true;
                 level.SweptBar = bar;
+                MarkRenderDirty();
 
                 // Entry-model precursor: taking sell-side liquidity primes LONGS,
                 // taking buy-side liquidity primes SHORTS.
@@ -51,14 +85,13 @@ namespace ICTSMC
                     _pendingBullSweepBar = bar;
 
                 JournalEvent(bar, "LiquiditySweep", level.BuySide ? "BuySide" : "SellSide", null, level.Price,
-                    level.IsEqual ? "Equal highs/lows pool" : "");
+                    level.Label);
 
                 if (!level.SweptAlerted && AlertOnSweep)
                 {
                     level.SweptAlerted = true;
                     var side = level.BuySide ? "Buy-side" : "Sell-side";
-                    var pool = level.IsEqual ? (level.BuySide ? " · equal highs" : " · equal lows") : "";
-                    Fire($"💧 Liquidity taken — {side}{pool}\n" +
+                    Fire($"💧 Liquidity taken — {side} · {level.Label}\n" +
                          $"📍 Level: {FormatPrice(level.Price)}\n" +
                          (level.BuySide
                              ? "👀 Next: watch for bearish MSS → short setup"
@@ -78,61 +111,66 @@ namespace ICTSMC
 
                 var rule = zone.IsOrderBlock ? ObMitigation : FvgMitigation;
 
-                // A bullish zone sits below price and is tapped from above;
-                // a bearish zone sits above price and is tapped from below.
-                var touched = zone.IsBullish ? candle.Low <= zone.Top : candle.High >= zone.Bottom;
-                if (!touched)
-                    continue;
+                var inContact = ZoneInContact(zone, candle.High, candle.Low);
 
-                // Distinct touch episodes: contact on consecutive bars is ONE episode;
-                // a full untouched bar in between separates two.
-                var isRetouch = zone.LastTouchedBar >= 0 && bar > zone.LastTouchedBar + 1;
-                zone.LastTouchedBar = bar;
-
-                if (zone.State == ZoneState.Active)
+                if (inContact)
                 {
-                    zone.State = ZoneState.Touched;
-                    zone.TouchEpisodes = 1;
-                    TryEmitContinuationSignal(zone, bar);
+                    // Distinct touch episodes: contact on consecutive bars is ONE episode;
+                    // a full untouched bar in between separates two.
+                    var isRetouch = zone.LastTouchedBar >= 0 && bar > zone.LastTouchedBar + 1;
+                    zone.LastTouchedBar = bar;
+                    MarkRenderDirty();
+
+                    if (zone.State == ZoneState.Active)
+                    {
+                        zone.State = ZoneState.Touched;
+                        zone.TouchEpisodes = 1;
+                        TryEmitContinuationSignal(zone, bar);
+                    }
+                    else if (isRetouch && zone.State == ZoneState.Touched)
+                    {
+                        zone.TouchEpisodes++;
+                        var age = bar - zone.StartBar;
+
+                        JournalEvent(bar, "ZoneRetouch", zone.IsBullish ? "Bull" : "Bear", zone, candle.Close,
+                            $"touch #{zone.TouchEpisodes}; zone age {age} bars");
+
+                        // Info only, deliberately NOT a trade signal: the first presentation
+                        // consumed the one-signal-per-zone budget; re-touches are weaker.
+                        if (AlertOnZoneRetouch)
+                            Fire($"🔁 Zone re-touched — {zone.Tag} (info only)\n" +
+                                 $"📍 Zone: {FormatPrice(zone.Bottom)}–{FormatPrice(zone.Top)}\n" +
+                                 $"🔢 Touch #{zone.TouchEpisodes} · zone is {age} bars old\n" +
+                                 "ℹ️ No signal: first touch already consumed — re-touches are lower probability");
+                    }
+
+                    if (!zone.TouchLogged)
+                    {
+                        zone.TouchLogged = true;
+                        JournalEvent(bar, "ZoneTouch", zone.IsBullish ? "Bull" : "Bear", zone, candle.Close, "");
+                    }
+
+                    if (!zone.TouchAlerted && AlertOnZoneTouch)
+                    {
+                        zone.TouchAlerted = true;
+                        Fire($"🎯 Zone tapped — {zone.Tag}\n" +
+                             $"📍 Range: {FormatPrice(zone.Bottom)}–{FormatPrice(zone.Top)}\n" +
+                             (zone.IsBullish
+                                 ? "🛡 Support — watch for the bounce"
+                                 : "🧱 Resistance — watch for the rejection"));
+                    }
                 }
-                else if (isRetouch && zone.State == ZoneState.Touched)
-                {
-                    zone.TouchEpisodes++;
-                    var age = bar - zone.StartBar;
 
-                    JournalEvent(bar, "ZoneRetouch", zone.IsBullish ? "Bull" : "Bear", zone, candle.Close,
-                        $"touch #{zone.TouchEpisodes}; zone age {age} bars");
-
-                    // Info only, deliberately NOT a trade signal: the first presentation
-                    // consumed the one-signal-per-zone budget; re-touches are weaker.
-                    if (AlertOnZoneRetouch)
-                        Fire($"🔁 Zone re-touched — {zone.Tag} (info only)\n" +
-                             $"📍 Zone: {FormatPrice(zone.Bottom)}–{FormatPrice(zone.Top)}\n" +
-                             $"🔢 Touch #{zone.TouchEpisodes} · zone is {age} bars old\n" +
-                             "ℹ️ No signal: first touch already consumed — re-touches are lower probability");
-                }
-
-                if (!zone.TouchLogged)
-                {
-                    zone.TouchLogged = true;
-                    JournalEvent(bar, "ZoneTouch", zone.IsBullish ? "Bull" : "Bear", zone, GetCandle(bar).Close, "");
-                }
-
-                if (!zone.TouchAlerted && AlertOnZoneTouch)
-                {
-                    zone.TouchAlerted = true;
-                    Fire($"🎯 Zone tapped — {zone.Tag}\n" +
-                         $"📍 Range: {FormatPrice(zone.Bottom)}–{FormatPrice(zone.Top)}\n" +
-                         (zone.IsBullish
-                             ? "🛡 Support — watch for the bounce"
-                             : "🧱 Resistance — watch for the rejection"));
-                }
-
-                // Touch-based mitigation rules react intrabar as well.
+                // Mitigation is evaluated whether or not the candle is in CONTACT with
+                // the zone. Midline and FullFill are level-crossing tests, and price can
+                // cross clean past a zone in a single candle without its range ever
+                // overlapping the zone (a gap or one violent bar). Gating them on contact
+                // would leave such a zone alive and tradeable forever.
                 switch (rule)
                 {
                     case MitigationRule.AnyTouch:
-                        Mitigate(zone, bar);
+                        if (inContact)
+                            Mitigate(zone, bar);
                         break;
 
                     case MitigationRule.Midline:
@@ -178,47 +216,60 @@ namespace ICTSMC
             // ArmOnFailedMss — the traders trapped in that failure ARE the liquidity,
             // so the failed shift itself counts as the sweep precursor for the new side
             // (the trap / IFVG continuation entry).
+            //
+            // That hand-off is BUDGETED. Left unbounded it let the model bootstrap
+            // itself: sweep → arm long → bearish MSS traps it → arm short (no sweep) →
+            // bullish MSS traps that → arm long (no sweep) → … Because the tracked trend
+            // flips on every alternating break, every alternating break is an MSS, so in
+            // a range the machine ping-ponged forever off ONE historical sweep while
+            // RequireSweepForEntry was on. MaxTrapChainHops caps how far an arming may
+            // sit from a real liquidity sweep.
             if (evt.Bullish)
             {
                 var trappedShorts = false;
+                var bearDepth = 0;
 
                 if (CancelOnOppositeMss)
                 {
                     trappedShorts = _armedBearUntil >= evt.Bar;
+                    bearDepth = _armedBearTrapDepth;
 
                     if (trappedShorts)
                         JournalEvent(evt.Bar, "FailedMSS", "Bear", null, evt.Level,
                             $"Short setup cancelled by bullish MSS @ {FormatPrice(evt.Level)}; " +
-                            $"was armed at bar {_armedBearAtBar} (source={_armedBearSource}, {evt.Bar - _armedBearAtBar} bars in, " +
-                            $"{_armedBearUntil - evt.Bar} bars of window left)" +
-                            (ArmOnFailedMss ? "; long trap-armed" : ""));
+                            $"was armed at bar {_armedBearAtBar} (source={_armedBearSource}, depth={bearDepth}, " +
+                            $"{evt.Bar - _armedBearAtBar} bars in, {_armedBearUntil - evt.Bar} bars of window left)");
 
                     _armedBearUntil = -1;
                     _armedBearAtBar = -1;
                     _armedBearSource = "";
+                    _armedBearTrapDepth = 0;
                     _pendingBearSweepBar = -1;
 
                     if (trappedShorts && AlertOnFailedMss)
                         Fire("⚠️ Failed bearish MSS\n" +
                              "❌ Armed SHORT setup cancelled by a bullish MSS\n" +
-                             (ArmOnFailedMss
-                                 ? "🪤 Long side auto-armed off the trapped shorts (trap/IFVG entry)"
-                                 : "👀 Failed shifts often fuel the opposite move — watch the new long side"));
+                             "👀 Failed shifts often fuel the opposite move — watch the new long side");
                 }
 
                 var hadSweep = _pendingBullSweepBar > 0 && evt.Bar - _pendingBullSweepBar <= SweepToMssWindow;
                 var sweepOk = !RequireSweepForEntry || hadSweep;
-                if (sweepOk || (ArmOnFailedMss && trappedShorts))
+
+                var trapDepth = bearDepth + 1;
+                var trapArmAllowed = ArmOnFailedMss && trappedShorts && trapDepth <= MaxTrapChainHops;
+
+                if (sweepOk || trapArmAllowed)
                 {
                     _armedBullUntil = evt.Bar + ArmWindowBars;
                     _armedBullAtBar = evt.Bar;
+                    _armedBullTrapDepth = hadSweep || !RequireSweepForEntry ? 0 : trapDepth;
                     _armedBullSource = hadSweep && trappedShorts ? "Sweep+Trap"
                         : hadSweep ? "Sweep"
-                        : trappedShorts ? "TrapArm"
+                        : trapArmAllowed ? "TrapArm"
                         : "MSS-only";
 
                     JournalEvent(evt.Bar, "Armed", "Bull", null, evt.Level,
-                        $"Source={_armedBullSource}; MssBar={evt.Bar}; " +
+                        $"Source={_armedBullSource}; TrapDepth={_armedBullTrapDepth}/{MaxTrapChainHops}; MssBar={evt.Bar}; " +
                         $"SweepBar={(hadSweep ? _pendingBullSweepBar.ToString() : "none")}; " +
                         $"SweepAge={(hadSweep ? $"{evt.Bar - _pendingBullSweepBar}/{SweepToMssWindow}" : "n/a")}; " +
                         $"ArmedUntil=bar {_armedBullUntil} (+{ArmWindowBars})");
@@ -228,51 +279,60 @@ namespace ICTSMC
                     var reason = _pendingBullSweepBar > 0
                         ? $"sell-side sweep too old: SweepBar={_pendingBullSweepBar}, age={evt.Bar - _pendingBullSweepBar} > window {SweepToMssWindow}"
                         : $"no sell-side sweep on record within {SweepToMssWindow} bars";
+                    var trapNote = !ArmOnFailedMss ? "trap-arm off"
+                        : !trappedShorts ? "no armed short to trap"
+                        : $"trap budget spent: depth {trapDepth} > MaxTrapChainHops {MaxTrapChainHops}";
+
                     JournalEvent(evt.Bar, "ArmRejected", "Bull", null, evt.Level,
-                        $"Bullish MSS @ {FormatPrice(evt.Level)} not armed; RequireSweep=on; {reason}; TrapArm={(ArmOnFailedMss ? "on, no armed short to trap" : "off")}");
+                        $"Bullish MSS @ {FormatPrice(evt.Level)} not armed; RequireSweep=on; {reason}; TrapArm: {trapNote}");
                 }
             }
             else
             {
                 var trappedLongs = false;
+                var bullDepth = 0;
 
                 if (CancelOnOppositeMss)
                 {
                     trappedLongs = _armedBullUntil >= evt.Bar;
+                    bullDepth = _armedBullTrapDepth;
 
                     if (trappedLongs)
                         JournalEvent(evt.Bar, "FailedMSS", "Bull", null, evt.Level,
                             $"Long setup cancelled by bearish MSS @ {FormatPrice(evt.Level)}; " +
-                            $"was armed at bar {_armedBullAtBar} (source={_armedBullSource}, {evt.Bar - _armedBullAtBar} bars in, " +
-                            $"{_armedBullUntil - evt.Bar} bars of window left)" +
-                            (ArmOnFailedMss ? "; short trap-armed" : ""));
+                            $"was armed at bar {_armedBullAtBar} (source={_armedBullSource}, depth={bullDepth}, " +
+                            $"{evt.Bar - _armedBullAtBar} bars in, {_armedBullUntil - evt.Bar} bars of window left)");
 
                     _armedBullUntil = -1;
                     _armedBullAtBar = -1;
                     _armedBullSource = "";
+                    _armedBullTrapDepth = 0;
                     _pendingBullSweepBar = -1;
 
                     if (trappedLongs && AlertOnFailedMss)
                         Fire("⚠️ Failed bullish MSS\n" +
                              "❌ Armed LONG setup cancelled by a bearish MSS\n" +
-                             (ArmOnFailedMss
-                                 ? "🪤 Short side auto-armed off the trapped longs (trap/IFVG entry)"
-                                 : "👀 Failed shifts often fuel the opposite move — watch the new short side"));
+                             "👀 Failed shifts often fuel the opposite move — watch the new short side");
                 }
 
                 var hadSweep = _pendingBearSweepBar > 0 && evt.Bar - _pendingBearSweepBar <= SweepToMssWindow;
                 var sweepOk = !RequireSweepForEntry || hadSweep;
-                if (sweepOk || (ArmOnFailedMss && trappedLongs))
+
+                var trapDepth = bullDepth + 1;
+                var trapArmAllowed = ArmOnFailedMss && trappedLongs && trapDepth <= MaxTrapChainHops;
+
+                if (sweepOk || trapArmAllowed)
                 {
                     _armedBearUntil = evt.Bar + ArmWindowBars;
                     _armedBearAtBar = evt.Bar;
+                    _armedBearTrapDepth = hadSweep || !RequireSweepForEntry ? 0 : trapDepth;
                     _armedBearSource = hadSweep && trappedLongs ? "Sweep+Trap"
                         : hadSweep ? "Sweep"
-                        : trappedLongs ? "TrapArm"
+                        : trapArmAllowed ? "TrapArm"
                         : "MSS-only";
 
                     JournalEvent(evt.Bar, "Armed", "Bear", null, evt.Level,
-                        $"Source={_armedBearSource}; MssBar={evt.Bar}; " +
+                        $"Source={_armedBearSource}; TrapDepth={_armedBearTrapDepth}/{MaxTrapChainHops}; MssBar={evt.Bar}; " +
                         $"SweepBar={(hadSweep ? _pendingBearSweepBar.ToString() : "none")}; " +
                         $"SweepAge={(hadSweep ? $"{evt.Bar - _pendingBearSweepBar}/{SweepToMssWindow}" : "n/a")}; " +
                         $"ArmedUntil=bar {_armedBearUntil} (+{ArmWindowBars})");
@@ -282,8 +342,12 @@ namespace ICTSMC
                     var reason = _pendingBearSweepBar > 0
                         ? $"buy-side sweep too old: SweepBar={_pendingBearSweepBar}, age={evt.Bar - _pendingBearSweepBar} > window {SweepToMssWindow}"
                         : $"no buy-side sweep on record within {SweepToMssWindow} bars";
+                    var trapNote = !ArmOnFailedMss ? "trap-arm off"
+                        : !trappedLongs ? "no armed long to trap"
+                        : $"trap budget spent: depth {trapDepth} > MaxTrapChainHops {MaxTrapChainHops}";
+
                     JournalEvent(evt.Bar, "ArmRejected", "Bear", null, evt.Level,
-                        $"Bearish MSS @ {FormatPrice(evt.Level)} not armed; RequireSweep=on; {reason}; TrapArm={(ArmOnFailedMss ? "on, no armed long to trap" : "off")}");
+                        $"Bearish MSS @ {FormatPrice(evt.Level)} not armed; RequireSweep=on; {reason}; TrapArm: {trapNote}");
                 }
             }
         }
@@ -322,6 +386,7 @@ namespace ICTSMC
                 _armedBullUntil = -1;
                 _armedBullAtBar = -1;
                 _armedBullSource = "";
+                _armedBullTrapDepth = 0;
             }
 
             if (_armedBearUntil > 0 && bar > _armedBearUntil)
@@ -331,6 +396,7 @@ namespace ICTSMC
                 _armedBearUntil = -1;
                 _armedBearAtBar = -1;
                 _armedBearSource = "";
+                _armedBearTrapDepth = 0;
             }
 
             var candle = GetCandle(bar);
@@ -345,75 +411,190 @@ namespace ICTSMC
                 tolerance = (range.Value.High.Price - range.Value.Low.Price) * PdTolerancePercent / 100m;
             }
 
+            var inKillzone = InKillzone(bar);
+
             if (_armedBullUntil >= bar)
             {
-                var touched = _zones.Where(z =>
-                    z.State != ZoneState.Mitigated &&
-                    z.IsBullish &&
-                    z.StartBar < bar &&
-                    candle.Low <= z.Top).ToList();
-
-                var matches = touched.Where(z =>
-                    !EntryNeedsPdAlignment || eq == null || z.Mid <= eq.Value + tolerance).ToList();
-
-                // Zones the PD filter vetoed — logged once per zone with the exact
-                // numbers, so every filtered entry can be audited and back-scored.
-                if (EntryNeedsPdAlignment && eq != null)
+                if (!inKillzone)
                 {
-                    foreach (var z in touched.Where(z => z.Mid > eq.Value + tolerance && !z.PdRejectLogged))
+                    // The setup is NOT consumed — it stays armed and can still fire once
+                    // the session opens, which is exactly how a killzone is traded.
+                    if (_kzRejectBullBar != bar)
                     {
-                        z.PdRejectLogged = true;
-                        JournalEvent(bar, "EntryRejected", "Bull", z, candle.Close,
-                            $"PD filter: zone mid {FormatPrice(z.Mid)} > limit {FormatPrice(eq.Value + tolerance)} " +
-                            $"(EQ {FormatPrice(eq.Value)} + tol {FormatPrice(tolerance)}); excess {FormatPrice(z.Mid - eq.Value - tolerance)}; " +
-                            $"ArmedSource={_armedBullSource}; ArmedAt=bar {_armedBullAtBar}");
+                        _kzRejectBullBar = bar;
+                        JournalEvent(bar, "EntryRejected", "Bull", null, candle.Close,
+                            $"Killzone filter: {BarTime(bar):HH:mm} outside [{KillzoneWindows}]; setup stays armed until bar {_armedBullUntil}");
                     }
                 }
-
-                if (matches.Count > 0)
+                else
                 {
-                    var source = _armedBullSource;
-                    _armedBullUntil = -1;
-                    _armedBullAtBar = -1;
-                    _pendingBullSweepBar = -1;
-                    _armedBullSource = "";
-                    EmitEntrySignal(matches, longSide: true, eq, tolerance, source, bar);
+                    var candidates = _zones.Where(z =>
+                        z.State != ZoneState.Mitigated &&
+                        z.IsBullish &&
+                        z.StartBar < bar &&
+                        ZoneInContact(z, candle.High, candle.Low)).ToList();
+
+                    var touched = candidates
+                        .Where(z => EntryEdgeTraded(z, candle.High, candle.Low))
+                        .ToList();
+
+                    // In contact but the proximal edge never traded this bar: price was
+                    // already inside or beyond the zone when the model armed, so quoting
+                    // that edge as the entry would put the plan on the wrong side of the
+                    // market. The setup is not consumed — it can still fire on a clean
+                    // re-entry — but the suppression is journaled, never silent.
+                    foreach (var z in candidates.Where(z => !z.EdgeRejectLogged && !touched.Contains(z)))
+                    {
+                        z.EdgeRejectLogged = true;
+                        JournalEvent(bar, "EntryRejected", "Bull", z, candle.Close,
+                            $"contact without an edge cross: entry {FormatPrice(z.Top)} was not traded on this bar " +
+                            "(price already inside/beyond the zone when armed); setup stays armed");
+                    }
+
+                    var matches = touched.Where(z => PdAligned(z, true, eq, tolerance)).ToList();
+
+                    // Zones the PD filter vetoed — logged once per zone with the exact
+                    // numbers, so every filtered entry can be audited and back-scored.
+                    if (EntryNeedsPdAlignment && eq != null)
+                    {
+                        foreach (var z in touched.Where(z => z.Mid > eq.Value + tolerance && !z.PdRejectLogged))
+                        {
+                            z.PdRejectLogged = true;
+                            JournalEvent(bar, "EntryRejected", "Bull", z, candle.Close,
+                                $"PD filter: zone mid {FormatPrice(z.Mid)} > limit {FormatPrice(eq.Value + tolerance)} " +
+                                $"(EQ {FormatPrice(eq.Value)} + tol {FormatPrice(tolerance)}); excess {FormatPrice(z.Mid - eq.Value - tolerance)}; " +
+                                $"ArmedSource={_armedBullSource}; ArmedAt=bar {_armedBullAtBar}");
+                        }
+                    }
+
+                    matches = FilterByOte(matches, true, bar, candle.Close);
+
+                    if (matches.Count > 0)
+                    {
+                        var source = _armedBullSource;
+                        _armedBullUntil = -1;
+                        _armedBullAtBar = -1;
+                        _pendingBullSweepBar = -1;
+                        _armedBullSource = "";
+                        _armedBullTrapDepth = 0;
+                        EmitEntrySignal(matches, longSide: true, eq, tolerance, source, bar);
+                    }
                 }
             }
 
             if (_armedBearUntil >= bar)
             {
-                var touched = _zones.Where(z =>
-                    z.State != ZoneState.Mitigated &&
-                    !z.IsBullish &&
-                    z.StartBar < bar &&
-                    candle.High >= z.Bottom).ToList();
-
-                var matches = touched.Where(z =>
-                    !EntryNeedsPdAlignment || eq == null || z.Mid >= eq.Value - tolerance).ToList();
-
-                if (EntryNeedsPdAlignment && eq != null)
+                if (!inKillzone)
                 {
-                    foreach (var z in touched.Where(z => z.Mid < eq.Value - tolerance && !z.PdRejectLogged))
+                    if (_kzRejectBearBar != bar)
                     {
-                        z.PdRejectLogged = true;
-                        JournalEvent(bar, "EntryRejected", "Bear", z, candle.Close,
-                            $"PD filter: zone mid {FormatPrice(z.Mid)} < limit {FormatPrice(eq.Value - tolerance)} " +
-                            $"(EQ {FormatPrice(eq.Value)} - tol {FormatPrice(tolerance)}); shortfall {FormatPrice(eq.Value - tolerance - z.Mid)}; " +
-                            $"ArmedSource={_armedBearSource}; ArmedAt=bar {_armedBearAtBar}");
+                        _kzRejectBearBar = bar;
+                        JournalEvent(bar, "EntryRejected", "Bear", null, candle.Close,
+                            $"Killzone filter: {BarTime(bar):HH:mm} outside [{KillzoneWindows}]; setup stays armed until bar {_armedBearUntil}");
                     }
                 }
-
-                if (matches.Count > 0)
+                else
                 {
-                    var source = _armedBearSource;
-                    _armedBearUntil = -1;
-                    _armedBearAtBar = -1;
-                    _pendingBearSweepBar = -1;
-                    _armedBearSource = "";
-                    EmitEntrySignal(matches, longSide: false, eq, tolerance, source, bar);
+                    var candidates = _zones.Where(z =>
+                        z.State != ZoneState.Mitigated &&
+                        !z.IsBullish &&
+                        z.StartBar < bar &&
+                        ZoneInContact(z, candle.High, candle.Low)).ToList();
+
+                    var touched = candidates
+                        .Where(z => EntryEdgeTraded(z, candle.High, candle.Low))
+                        .ToList();
+
+                    // In contact but the proximal edge never traded this bar: price was
+                    // already inside or beyond the zone when the model armed, so quoting
+                    // that edge as the entry would put the plan on the wrong side of the
+                    // market. The setup is not consumed — it can still fire on a clean
+                    // re-entry — but the suppression is journaled, never silent.
+                    foreach (var z in candidates.Where(z => !z.EdgeRejectLogged && !touched.Contains(z)))
+                    {
+                        z.EdgeRejectLogged = true;
+                        JournalEvent(bar, "EntryRejected", "Bear", z, candle.Close,
+                            $"contact without an edge cross: entry {FormatPrice(z.Bottom)} was not traded on this bar " +
+                            "(price already inside/beyond the zone when armed); setup stays armed");
+                    }
+
+                    var matches = touched.Where(z => PdAligned(z, false, eq, tolerance)).ToList();
+
+                    if (EntryNeedsPdAlignment && eq != null)
+                    {
+                        foreach (var z in touched.Where(z => z.Mid < eq.Value - tolerance && !z.PdRejectLogged))
+                        {
+                            z.PdRejectLogged = true;
+                            JournalEvent(bar, "EntryRejected", "Bear", z, candle.Close,
+                                $"PD filter: zone mid {FormatPrice(z.Mid)} < limit {FormatPrice(eq.Value - tolerance)} " +
+                                $"(EQ {FormatPrice(eq.Value)} - tol {FormatPrice(tolerance)}); shortfall {FormatPrice(eq.Value - tolerance - z.Mid)}; " +
+                                $"ArmedSource={_armedBearSource}; ArmedAt=bar {_armedBearAtBar}");
+                        }
+                    }
+
+                    matches = FilterByOte(matches, false, bar, candle.Close);
+
+                    if (matches.Count > 0)
+                    {
+                        var source = _armedBearSource;
+                        _armedBearUntil = -1;
+                        _armedBearAtBar = -1;
+                        _pendingBearSweepBar = -1;
+                        _armedBearSource = "";
+                        _armedBearTrapDepth = 0;
+                        EmitEntrySignal(matches, longSide: false, eq, tolerance, source, bar);
+                    }
                 }
             }
+        }
+
+        private bool PdAligned(Zone zone, bool longSide, decimal? eq, decimal tolerance)
+        {
+            if (!EntryNeedsPdAlignment || eq == null)
+                return true;
+
+            return longSide ? zone.Mid <= eq.Value + tolerance : zone.Mid >= eq.Value - tolerance;
+        }
+
+        /// <summary>
+        /// Optional OTE refinement (ICT's 0.618–0.79 "optimal trade entry" pocket of the
+        /// current impulse leg). Applies only when the leg direction matches the trade
+        /// side — a retracement pocket is undefined against the leg — so it narrows
+        /// entries without ever silently vetoing a whole side.
+        /// </summary>
+        private List<Zone> FilterByOte(List<Zone> matches, bool longSide, int bar, decimal close)
+        {
+            if (!OteFilterEnabled || matches.Count == 0)
+                return matches;
+
+            if (_legDirection != (longSide ? 1 : -1))
+                return matches;
+
+            var band = GetOteBand();
+            if (!band.HasValue)
+                return matches;
+
+            var kept = new List<Zone>();
+
+            foreach (var z in matches)
+            {
+                if (z.Mid <= band.Value.Top && z.Mid >= band.Value.Bottom)
+                {
+                    kept.Add(z);
+                    continue;
+                }
+
+                if (!z.OteRejectLogged)
+                {
+                    z.OteRejectLogged = true;
+                    JournalEvent(bar, "EntryRejected", longSide ? "Bull" : "Bear", z, close,
+                        $"OTE filter: zone mid {FormatPrice(z.Mid)} outside " +
+                        $"{FormatPrice(band.Value.Bottom)}–{FormatPrice(band.Value.Top)} " +
+                        $"({OteMinPercent:0.#}%–{OteMaxPercent:0.#}% retracement of the current leg)");
+                }
+            }
+
+            return kept;
         }
 
         private void EmitEntrySignal(List<Zone> matches, bool longSide, decimal? eq, decimal tolerance, string armSource, int bar)
@@ -466,6 +647,7 @@ namespace ICTSMC
             }
 
             var dir = longSide ? "LONG" : "SHORT";
+            var candle = GetCandle(bar);
 
             var record = new SignalRecord
             {
@@ -487,7 +669,9 @@ namespace ICTSMC
                 PdStatus = pdStatus,
                 Confluence = confluence,
                 SignalBar = bar,
-                TriggerZoneId = trigger.Id
+                TriggerZoneId = trigger.Id,
+                HighAtSignal = candle.High,
+                LowAtSignal = candle.Low
             };
 
             JournalSignal(record);
@@ -530,6 +714,17 @@ namespace ICTSMC
             if (bar - zone.StartBar > ContinuationMaxAgeBars)
                 return;
 
+            var candle = GetCandle(bar);
+
+            // Same contact discipline as the core model: the quoted entry edge must
+            // actually have traded on this bar, so a C-tier plan can never be printed
+            // with its entry sitting on the wrong side of the market.
+            if (!EntryEdgeTraded(zone, candle.High, candle.Low))
+                return;
+
+            if (!InKillzone(bar))
+                return;
+
             var range = GetDealingRange();
             decimal? eq = null;
             var tolerance = 0m;
@@ -539,8 +734,7 @@ namespace ICTSMC
                 tolerance = (range.Value.High.Price - range.Value.Low.Price) * PdTolerancePercent / 100m;
             }
 
-            var pdOk = !EntryNeedsPdAlignment || eq == null ||
-                       (longSide ? zone.Mid <= eq.Value + tolerance : zone.Mid >= eq.Value - tolerance);
+            var pdOk = PdAligned(zone, longSide, eq, tolerance);
             var armed = longSide ? _armedBullUntil >= bar : _armedBearUntil >= bar;
 
             // The core model owns this touch — it can (or just did) fire an A/B signal.
@@ -588,7 +782,9 @@ namespace ICTSMC
                 PdStatus = pdStatus,
                 Confluence = $"Non-ICT concept · momentum continuation · {reason}",
                 SignalBar = bar,
-                TriggerZoneId = zone.Id
+                TriggerZoneId = zone.Id,
+                HighAtSignal = candle.High,
+                LowAtSignal = candle.Low
             };
 
             JournalSignal(record);
@@ -651,6 +847,32 @@ namespace ICTSMC
             return (high, low);
         }
 
+        /// <summary>
+        /// The OTE pocket of the CURRENT impulse leg: the configured retracement band
+        /// (0.618–0.79 by default) measured back from the leg's extreme toward its
+        /// origin. Null before the first structure break or on a degenerate leg.
+        /// </summary>
+        private (decimal Top, decimal Bottom)? GetOteBand()
+        {
+            if (_legDirection == 0 || _legAnchor == null || _legExtreme == null)
+                return null;
+
+            var high = _legDirection == 1 ? _legExtreme.Price : _legAnchor.Price;
+            var low = _legDirection == 1 ? _legAnchor.Price : _legExtreme.Price;
+            var span = high - low;
+
+            if (span <= 0m)
+                return null;
+
+            var near = Math.Min(OteMinPercent, OteMaxPercent) / 100m;
+            var far = Math.Max(OteMinPercent, OteMaxPercent) / 100m;
+
+            if (_legDirection == 1)
+                return (high - span * near, high - span * far);
+
+            return (low + span * far, low + span * near);
+        }
+
         #endregion
 
         #region Alert plumbing
@@ -684,9 +906,14 @@ namespace ICTSMC
                     var flat = message.Replace("\n", " | ");
                     AddAlert(AlertFile, string.IsNullOrEmpty(instrument) ? flat : $"[{instrument}] {flat}");
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Alert subsystem unavailable (e.g. during optimization) — ignore.
+                    // Alert subsystem unavailable (e.g. during optimization), or the
+                    // configured sound file does not exist. Never rethrow onto the chart
+                    // thread — but leave a trace, because a silently swallowed popup
+                    // failure is indistinguishable from "no alerts fired".
+                    JournalEvent(_lastSeenBar, "AlertFailed", "", null, 0m,
+                        $"popup alert failed (sound file '{AlertFile}'): {ex.GetType().Name}: {ex.Message}");
                 }
             }
 

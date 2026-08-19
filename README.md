@@ -14,7 +14,7 @@ candle to close.
 | **Fair Value Gaps** (Ch. 4) | 3-candle imbalance with tick + ATR minimum-size filters, midline (consequent encroachment) shown, configurable mitigation |
 | **Inversion FVGs (IFVG)** | A body close through a gap flips its polarity: failed bullish FVG → resistance, failed bearish FVG → support; distinct teal/purple colors; failed MSS also auto-arms the opposite entry side (trap entry, toggleable) |
 | **Order Blocks** (Ch. 5) | Last opposite-colored candle before a displacement that **breaks structure**; body-only (open↔close, as taught) or full-range zones |
-| **BoS / MSS** (Ch. 6) | Fractal swings → close-through breaks; continuation = BoS (dashed), reversal = MSS/CHoCH (solid, stronger) |
+| **BoS / MSS** (Ch. 6) | Fractal swings → close-through breaks of the **protected** swing (internal pullback highs/lows no longer count); continuation = BoS (dashed, light), reversal = MSS/CHoCH (solid, heavier) |
 | **Entry model** (Ch. 7) | State machine: *liquidity sweep → MSS → price returns to aligned FVG/OB in the correct half of the range* → entry alert with SL + 2R/3R targets |
 | **Premium / Discount, Power of 3** (Ch. 8) | Equilibrium (50%) of the current dealing range, subtle premium/discount shading; entry model only buys in discount / sells in premium |
 | **Higher-timeframe framework** | **Auto mode (default):** the indicator *measures* the chart timeframe from the data itself and picks the institutional ladder (1m→15m+1H, 5m→1H+4H, 15m–1H→4H+D, 4H→D+W); HTF FVGs and OBs are mapped onto your chart with stronger styling. An on-chart badge shows exactly what was detected/chosen. Manual mode with fixed minutes is still available |
@@ -47,6 +47,41 @@ toggle:
 - ⚠️ **Failed MSS** — an armed setup structurally invalidated by an opposite MSS
 - 🔁 **Zone re-touched (info only)** — price returned to an already-touched zone
 - 📦 **Zone created**
+
+### What the engine adds beyond the book
+
+- **Breaker blocks** — an order block a body closes through flips polarity and is traded
+  from the other side on the retest (`BreakerBlocksEnabled`, on).
+- **PDH / PDL / PWH / PWL** — previous day and previous week extremes mapped as liquidity
+  pools, exempt from the swing-level cull (`SessionLevelsEnabled`, on).
+- **OTE band** — the 0.618–0.79 retracement pocket of the current impulse leg, drawn
+  always (`ShowOte`) and optionally enforced as an entry filter (`OteFilterEnabled`, off).
+- **Killzone filter** — entries only inside your session windows (`KillzoneFilterEnabled`,
+  **off** by default). It ships off only because the right clock times depend on your
+  platform's timezone: set `KillzoneWindows` (default `02:00-05:00, 07:00-10:00,
+  13:30-16:00`) to your chart's time, then switch it on. ICT practice is to use it.
+- **Trap-arm budget** — `MaxTrapChainHops` (default 1) caps how far an armed setup may
+  sit from a real liquidity sweep, so "require a sweep" stays true in chop.
+
+### Behaviour changes you should know about
+
+If you have run an earlier build, these change what fires:
+
+- **Protected-swing structure** (`UseProtectedSwings`, on) — breaking a minor pullback
+  high is internal structure and no longer prints a BoS/MSS, creates an order block, or
+  re-anchors the dealing range. Expect noticeably fewer, better structure events.
+- **Entry needs an edge cross** — a signal now requires price to trade *through* the
+  zone's entry edge on that bar, not merely to be in contact with the zone. This closes
+  a real bug where a long could fire with its quoted entry above the market.
+- **Order blocks need an imbalance** (`RequireImbalanceForOb`, on) — a slow grind that
+  merely covers the ATR distance no longer qualifies as displacement.
+- **HTF gaps are filtered against the HTF layer's own range**, not the chart ATR, so far
+  fewer spurious HTF zones — and therefore fewer inflated A+/A++ tiers.
+- **HTF order blocks now need a structure break**, not just a wide candle.
+- **Display toggles no longer change detection** — hiding FVGs or OBs is purely visual.
+- **Every detection setting triggers a clean recalculation** instead of leaving state
+  built under the old rules.
+- **MAE/MFE now include the signal bar**, so historical stats are stricter (and honest).
 
 ### Telegram setup
 
@@ -121,7 +156,7 @@ Copy `src/ICTSMCStrategy/bin/Release/ICTSMCStrategy.dll` into
   premium/discount filter + tolerance, opposite-MSS cancellation, failed-MSS trap
   arming (IFVG logic), SL buffer ticks
 - **Palette** — every zone family has its own hue so the chart reads at a glance:
-  OB green/red, FVG blue/orange, IFVG teal/purple, HTF zones rendered as gold frames (same 1px weight as LTF borders); labels auto-hide when a zone is too small,
+  OB green/red, FVG blue/orange, IFVG teal/purple, breakers green/red, HTF zones rendered as gold 2px frames; EQH/EQL pools and PDH/PDL/PWH/PWL draw with a heavier stroke; labels sit on a translucent backdrop pill and auto-hide when a zone is too small,
   so zooming out never leaves orphaned text
 
 ## Journal / audit pipeline

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Linq;
+using System.Threading;
 using ATAS.Indicators;
 using OFT.Rendering.Context;
 using OFT.Rendering.Tools;
@@ -15,6 +16,11 @@ namespace ICTSMC
     /// of smearing to the right edge, and Clean mode culls anything far from price.
     /// The full detection state lives on underneath (alerts, entry model and the
     /// journal all see everything); rendering is just the visible slice of it.
+    ///
+    /// THREADING: OnRender runs on the chart's drawing thread while OnCalculate runs
+    /// on the data thread. Nothing here touches the engine's live collections — it
+    /// works exclusively from the immutable <see cref="RenderModel"/> snapshot the
+    /// calculation thread publishes, so there is no shared mutable state to race on.
     /// </summary>
     public partial class ICTSMCStrategy
     {
@@ -25,37 +31,70 @@ namespace ICTSMC
         private const int TouchedZoneAlpha = 30;
         private const int MitigatedZoneAlpha = 14;
         private const int PdShadeAlpha = 10;
+        private const int OteShadeAlpha = 16;
+        private const int LabelBackdropAlpha = 120;
+
+        // Pens are immutable for a given (colour, width, dash) triple and were
+        // previously reallocated for every zone on every frame. The cache is only
+        // ever touched from the drawing thread.
+        private readonly Dictionary<(int Argb, int Width, DashStyle Dash), RenderPen> _penCache = new();
+
+        private RenderPen GetPen(Color color, int width = 1, DashStyle dash = DashStyle.Solid)
+        {
+            var key = (color.ToArgb(), width, dash);
+            if (_penCache.TryGetValue(key, out var pen))
+                return pen;
+
+            pen = new RenderPen(color, width, dash);
+            _penCache[key] = pen;
+            return pen;
+        }
 
         protected override void OnRender(RenderContext context, DrawingLayouts layout)
         {
             if (ChartInfo == null || InstrumentInfo == null || CurrentBar < 2)
                 return;
 
-            var region = Container.Region;
-            var lastBar = CurrentBar - 1;
+            // Single volatile read: everything below works from an immutable snapshot.
+            var model = Volatile.Read(ref _renderModel);
+            if (model == null)
+                return;
 
-            if (ShowPremiumDiscount)
-                RenderPremiumDiscount(context, region, lastBar);
+            // Defence in depth. ATAS gives OnRender no exception boundary of its own,
+            // so anything thrown here degrades or kills the chart's drawing for the
+            // rest of the session. Losing one frame is always preferable.
+            try
+            {
+                var region = Container.Region;
+                var lastBar = CurrentBar - 1;
 
-            RenderZones(context, region, lastBar);
+                if (ShowPremiumDiscount)
+                    RenderPremiumDiscount(context, region, model);
 
-            if (ShowLiquidity)
-                RenderLiquidity(context, region, lastBar);
+                RenderZones(context, region, lastBar, model);
 
-            if (ShowStructure)
-                RenderStructure(context, region);
+                if (ShowLiquidity)
+                    RenderLiquidity(context, region, lastBar, model);
 
-            if (HtfEnabled && ShowHtfInfoBadge)
-                RenderHtfBadge(context, region);
+                if (ShowStructure)
+                    RenderStructure(context, region, model);
+
+                if (HtfEnabled && ShowHtfInfoBadge)
+                    RenderHtfBadge(context, region, model);
+            }
+            catch (Exception)
+            {
+                // Drop the frame; the next one redraws from a fresh snapshot.
+            }
         }
 
         /// <summary>
         /// Small badge in the chart corner showing the measured chart timeframe and
         /// the HTF layer(s) in use — so the auto selection is always verifiable at a glance.
         /// </summary>
-        private void RenderHtfBadge(RenderContext context, Rectangle region)
+        private void RenderHtfBadge(RenderContext context, Rectangle region, RenderModel model)
         {
-            var text = string.IsNullOrEmpty(_htfInfo) ? "HTF: measuring chart timeframe…" : _htfInfo;
+            var text = string.IsNullOrEmpty(model.HtfInfo) ? "HTF: measuring chart timeframe…" : model.HtfInfo;
             context.DrawString(text, ZoneFont, Color.FromArgb(190, 200, 200, 200), region.Left + 10, region.Top + 8);
         }
 
@@ -66,9 +105,9 @@ namespace ICTSMC
         /// budget (HTF zones get double range — a fresh Daily OB stays visible
         /// longer). Detailed mode shows every unmitigated zone.
         /// </summary>
-        private List<Zone> SelectVisibleZones(int lastBar)
+        private List<ZoneView> SelectVisibleZones(RenderModel model)
         {
-            IEnumerable<Zone> pool = _zones;
+            IEnumerable<ZoneView> pool = model.Zones;
 
             if (!ShowMitigated)
                 pool = pool.Where(z => z.State != ZoneState.Mitigated);
@@ -80,12 +119,12 @@ namespace ICTSMC
             if (DisplayMode == DisplayMode.Detailed)
                 return pool.ToList();
 
-            var price = GetCandle(lastBar).Close;
-            var budget = _atr > 0 && ZoneVisibilityAtrRange > 0
-                ? _atr * ZoneVisibilityAtrRange
+            var price = model.LastClose;
+            var budget = model.Atr > 0 && ZoneVisibilityAtrRange > 0
+                ? model.Atr * ZoneVisibilityAtrRange
                 : decimal.MaxValue;
 
-            decimal Distance(Zone z) => z.Contains(price)
+            decimal Distance(ZoneView z) => z.Contains(price)
                 ? 0m
                 : Math.Min(Math.Abs(price - z.Top), Math.Abs(price - z.Bottom));
 
@@ -95,7 +134,7 @@ namespace ICTSMC
                 .Where(t => t.Dist <= (t.Zone.IsHtf ? budget * 2 : budget))
                 .ToList();
 
-            var visible = new List<Zone>();
+            var visible = new List<ZoneView>();
 
             foreach (var bullish in new[] { true, false })
             {
@@ -111,9 +150,9 @@ namespace ICTSMC
             return visible;
         }
 
-        private void RenderZones(RenderContext context, Rectangle region, int lastBar)
+        private void RenderZones(RenderContext context, Rectangle region, int lastBar, RenderModel model)
         {
-            var visible = SelectVisibleZones(lastBar);
+            var visible = SelectVisibleZones(model);
             if (visible.Count == 0)
                 return;
 
@@ -127,8 +166,8 @@ namespace ICTSMC
             foreach (var zone in visible.OrderByDescending(z => z.IsHtf).ThenBy(z => z.StartBar))
             {
                 var x1 = ChartInfo.GetXByBar(zone.StartBar, false);
-                var x2 = zone.EndBar.HasValue
-                    ? Math.Min(ChartInfo.GetXByBar(zone.EndBar.Value, false), xLive)
+                var x2 = zone.HasEndBar
+                    ? Math.Min(ChartInfo.GetXByBar(zone.EndBar, false), xLive)
                     : xLive;
 
                 var y1 = ChartInfo.GetYByPrice(zone.Top, false);
@@ -139,15 +178,15 @@ namespace ICTSMC
                 if (x2 <= x1 || Math.Max(y1, y2) < region.Top || Math.Min(y1, y2) > region.Bottom)
                     continue;
 
-                var baseColor = ZoneColor(zone);
+                var baseColor = ZoneColor(zone.Type);
                 var rect = new Rectangle(x1, Math.Min(y1, y2), x2 - x1, Math.Max(2, Math.Abs(y2 - y1)));
 
                 if (zone.IsHtf)
                 {
                     // HTF zones are frames, not fills — they outline confluence
-                    // without stacking paint over the LTF zones inside them.
-                    // Same 1px weight as LTF borders; the dedicated hue alone marks HTF.
-                    context.DrawRectangle(new RenderPen(Color.FromArgb(220, HtfBorderColor), 1), rect);
+                    // without stacking paint over the LTF zones inside them. The
+                    // heavier 2px stroke and the dedicated hue both mark them as HTF.
+                    context.DrawRectangle(GetPen(Color.FromArgb(220, HtfBorderColor), 2), rect);
                 }
                 else
                 {
@@ -159,14 +198,14 @@ namespace ICTSMC
                     };
 
                     context.FillRectangle(Color.FromArgb(alpha, baseColor), rect);
-                    context.DrawRectangle(new RenderPen(Color.FromArgb(160, baseColor), 1), rect);
+                    context.DrawRectangle(GetPen(Color.FromArgb(160, baseColor), 1), rect);
 
                     // Midline (consequent encroachment) when there is room.
                     if (zone.State != ZoneState.Mitigated && rect.Width >= 14 && rect.Height >= 8)
                     {
                         var midY = ChartInfo.GetYByPrice(zone.Mid, false);
                         if (midY > region.Top && midY < region.Bottom)
-                            context.DrawLine(new RenderPen(Color.FromArgb(70, baseColor), 1, DashStyle.Dot),
+                            context.DrawLine(GetPen(Color.FromArgb(70, baseColor), 1, DashStyle.Dot),
                                 x1, midY, x2, midY);
                     }
                 }
@@ -179,7 +218,7 @@ namespace ICTSMC
         /// Zone tag precisely centered (both axes) on a translucent backdrop pill,
         /// auto-hidden whenever the zone is too small to host it cleanly.
         /// </summary>
-        private void DrawCenteredZoneLabel(RenderContext context, Zone zone, Rectangle rect, Color baseColor)
+        private void DrawCenteredZoneLabel(RenderContext context, ZoneView zone, Rectangle rect, Color baseColor)
         {
             if (zone.State == ZoneState.Mitigated)
                 return;
@@ -190,6 +229,10 @@ namespace ICTSMC
 
             var textX = rect.Left + (rect.Width - size.Width) / 2;
             var textY = rect.Top + (rect.Height - size.Height) / 2;
+
+            // Backdrop pill: keeps the tag readable where zones overlap candles.
+            context.FillRectangle(Color.FromArgb(LabelBackdropAlpha, 14, 17, 22),
+                new Rectangle(textX - 3, textY - 1, size.Width + 6, size.Height + 2));
 
             var labelColor = zone.IsHtf ? HtfBorderColor : baseColor;
             context.DrawString(zone.Tag, ZoneFont, Color.FromArgb(240, labelColor), textX, textY);
@@ -228,21 +271,26 @@ namespace ICTSMC
             context.DrawString(text, StructureFont, textColor, textX, textY);
         }
 
-        private Color ZoneColor(Zone zone) => zone.Type switch
+        private Color ZoneColor(ZoneType type) => type switch
         {
             ZoneType.BullOrderBlock => BullObColor,
             ZoneType.BearOrderBlock => BearObColor,
             ZoneType.BullFvg => BullFvgColor,
             ZoneType.BearFvg => BearFvgColor,
             ZoneType.BullIfvg => BullIfvgColor,
+            ZoneType.BullBreaker => BullBreakerColor,
+            ZoneType.BearBreaker => BearBreakerColor,
             _ => BearIfvgColor
         };
+
+        /// <summary>Overload for callers that hold a live Zone (the /shot snapshot renderer).</summary>
+        private Color ZoneColor(Zone zone) => ZoneColor(zone.Type);
 
         #endregion
 
         #region Liquidity
 
-        private void RenderLiquidity(RenderContext context, Rectangle region, int lastBar)
+        private void RenderLiquidity(RenderContext context, Rectangle region, int lastBar, RenderModel model)
         {
             // Liquidity lines track price like zones do: unswept levels stop one
             // bar past the live candle instead of running to the screen edge.
@@ -250,12 +298,12 @@ namespace ICTSMC
             var barWidth = lastBar > 0 ? Math.Max(2, xLast - ChartInfo.GetXByBar(lastBar - 1, false)) : 4;
             var xLive = Math.Min(region.Right, xLast + barWidth * 2);
 
-            foreach (var level in _liquidity)
+            foreach (var level in model.Liquidity)
             {
                 // Swept liquidity is history — it fades out after a short window.
-                if (level.Swept && level.SweptBar.HasValue &&
+                if (level.Swept && level.HasSweptBar &&
                     DisplayMode == DisplayMode.Clean &&
-                    lastBar - level.SweptBar.Value > SweptRetentionBars)
+                    lastBar - level.SweptBar > SweptRetentionBars)
                     continue;
 
                 var y = ChartInfo.GetYByPrice(level.Price, false);
@@ -263,31 +311,28 @@ namespace ICTSMC
                     continue;
 
                 var x1 = Math.Max(ChartInfo.GetXByBar(level.StartBar, false), region.Left);
-                var x2 = level.Swept && level.SweptBar.HasValue
-                    ? Math.Min(ChartInfo.GetXByBar(level.SweptBar.Value, false), region.Right)
+                var x2 = level.Swept && level.HasSweptBar
+                    ? Math.Min(ChartInfo.GetXByBar(level.SweptBar, false), region.Right)
                     : xLive;
 
                 if (x2 <= x1)
                     continue;
 
-                // One line style for ALL liquidity levels — EQH/EQL pools are
-                // distinguished by their label alone, not by stroke weight.
+                // Clustered stops are a stronger magnet, and so are previous session
+                // extremes — EQH/EQL pools and PDH/PDL/PWH/PWL draw with a heavier stroke.
                 var color = level.BuySide ? BslColor : SslColor;
                 var alpha = level.Swept ? 70 : 170;
-                var pen = new RenderPen(Color.FromArgb(alpha, color), 1, DashStyle.Dash);
+                var pen = GetPen(Color.FromArgb(alpha, color), level.Emphasis ? 2 : 1, DashStyle.Dash);
 
                 if (!level.Swept)
                 {
-                    var label = level.BuySide
-                        ? (level.IsEqual ? "EQH · BSL" : "BSL")
-                        : (level.IsEqual ? "EQL · SSL" : "SSL");
-                    DrawLabeledLine(context, pen, label, Color.FromArgb(220, color), x1, x2, y, region);
+                    DrawLabeledLine(context, pen, level.Label, Color.FromArgb(220, color), x1, x2, y, region);
                 }
                 else
                 {
                     // Only genuine sweeps (trap: closed back inside) are labeled —
                     // runs stay unlabeled, per standard ICT chart presentation.
-                    var label = level.WasTrap == true ? "Sweep" : null;
+                    var label = level.WasTrap ? "Sweep" : null;
                     DrawLabeledLine(context, pen, label, Color.FromArgb(200, color), x1, x2, y, region);
                 }
             }
@@ -297,13 +342,13 @@ namespace ICTSMC
 
         #region Structure
 
-        private void RenderStructure(RenderContext context, Rectangle region)
+        private void RenderStructure(RenderContext context, Rectangle region, RenderModel model)
         {
             // Only the most recent events matter live; old structure is implied
             // by the zones it produced.
-            var recent = _structure.Count > MaxStructureLabels
-                ? _structure.Skip(_structure.Count - MaxStructureLabels)
-                : _structure;
+            var recent = model.Structure.Count > MaxStructureLabels
+                ? model.Structure.Skip(model.Structure.Count - MaxStructureLabels)
+                : model.Structure;
 
             foreach (var evt in recent)
             {
@@ -320,10 +365,12 @@ namespace ICTSMC
                 x1 = Math.Max(x1, region.Left);
                 x2 = Math.Min(x2, region.Right);
 
-                // `---- BoS ----` / `---- MSS ----`: identical dashed 1px style for
-                // both — the label text alone tells them apart.
+                // `---- MSS ----` solid and heavier, `---- BoS ----` dashed and light:
+                // an MSS is the stronger, rarer event and should read that way at a glance.
                 var color = evt.Bullish ? BullStructureColor : BearStructureColor;
-                var pen = new RenderPen(Color.FromArgb(150, color), 1, DashStyle.Dash);
+                var pen = evt.IsMss
+                    ? GetPen(Color.FromArgb(200, color), 2)
+                    : GetPen(Color.FromArgb(150, color), 1, DashStyle.Dash);
 
                 DrawLabeledLine(context, pen, evt.IsMss ? "MSS" : "BoS",
                     Color.FromArgb(240, color), x1, x2, y, region);
@@ -334,20 +381,18 @@ namespace ICTSMC
 
         #region Premium / Discount
 
-        private void RenderPremiumDiscount(RenderContext context, Rectangle region, int lastBar)
+        private void RenderPremiumDiscount(RenderContext context, Rectangle region, RenderModel model)
         {
             // Same ordered dealing range the entry filter uses — the drawing on the
             // chart and the PD gate in the signal engine can never disagree.
-            var range = GetDealingRange();
-            if (!range.HasValue)
+            if (!model.HasRange)
                 return;
 
-            var high = range.Value.High.Price;
-            var low = range.Value.Low.Price;
-            var eq = (high + low) / 2m;
+            var high = model.RangeHigh;
+            var low = model.RangeLow;
+            var eq = model.RangeEq;
 
-            var anchorBar = Math.Min(range.Value.High.Bar, range.Value.Low.Bar);
-            var x1 = Math.Max(ChartInfo.GetXByBar(anchorBar, false), region.Left);
+            var x1 = Math.Max(ChartInfo.GetXByBar(model.RangeAnchorBar, false), region.Left);
             var x2 = region.Right;
             if (x2 <= x1)
                 return;
@@ -370,7 +415,23 @@ namespace ICTSMC
                         new Rectangle(x1, yEq, x2 - x1, yLow - yEq));
             }
 
-            context.DrawLine(new RenderPen(Color.FromArgb(150, EquilibriumColor), 1, DashStyle.DashDot),
+            // OTE pocket (0.618–0.79 retracement of the current impulse leg).
+            if (ShowOte && model.HasOte)
+            {
+                var yOteTop = ChartInfo.GetYByPrice(model.OteTop, false);
+                var yOteBottom = ChartInfo.GetYByPrice(model.OteBottom, false);
+                var top = Math.Max(region.Top, Math.Min(yOteTop, yOteBottom));
+                var bottom = Math.Min(region.Bottom, Math.Max(yOteTop, yOteBottom));
+
+                if (bottom > top)
+                {
+                    context.FillRectangle(Color.FromArgb(OteShadeAlpha, OteColor),
+                        new Rectangle(x1, top, x2 - x1, bottom - top));
+                    context.DrawString("OTE", ZoneFont, Color.FromArgb(170, OteColor), x1 + 3, top + 2);
+                }
+            }
+
+            context.DrawLine(GetPen(Color.FromArgb(150, EquilibriumColor), 1, DashStyle.DashDot),
                 x1, yEq, x2, yEq);
             context.DrawString("EQ 50%", ZoneFont, Color.FromArgb(180, EquilibriumColor), x1 + 3, yEq + 2);
         }

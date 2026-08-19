@@ -44,10 +44,15 @@ Why the split matters:
 - But price **reacts** to a level the instant it is touched — waiting for a 1H candle to
   close after price tapped your FVG means being 59 minutes late. So every reaction runs
   tick-by-tick.
-- A bar is known to be final when ATAS first calls with the *next* bar index. Repeated
-  calls on the same index can only happen live — that's how the indicator knows history
-  ended, and **alerts are hard-gated to realtime only** (a chart reload can never spam
-  Telegram with historical events).
+- A bar is known to be final when ATAS first calls with the *next* bar index. An
+  already-consumed index is **ignored outright** — ATAS may revisit a finalized bar
+  (amended history, provider corrections, a partial refresh), and re-running the
+  bar-close engine there would double-count swings, structure, zones and HTF candles.
+- Repeated calls on the same index mean live ticks, but only the **newest** bar of the
+  series can genuinely be live, and the latch checks that. **Alerts are hard-gated to
+  realtime only**, and a duplicated historical bar (some providers re-emit one during
+  load) can no longer flip the whole replay into LIVE mode and spam Telegram with
+  history.
 
 ---
 
@@ -69,7 +74,15 @@ A bar `p` is a **swing high** when its high is not exceeded by any bar within
 ### 2.2 Trend state, BoS and MSS (Ch. 6)
 
 The indicator maintains one trend state: **+1 bullish / −1 bearish / 0 undefined**, and
-tracks the most recent *unbroken* swing high and swing low.
+tracks the **protected** swing high and swing low (`UseProtectedSwings`, default on).
+
+Taking the most *recent* pivot unconditionally is wrong: a lower high printed during a
+pullback would replace the real, still-unbroken structural high above it, so breaking
+that minor high registered a BoS/MSS, created an order block, re-anchored the dealing
+range and flipped the trend. In ICT terms that is **internal** structure, not a break.
+The defended swing is now replaced only when the old one has actually been broken, or
+when the new pivot is more extreme (in which case price already traded through the old
+one and it is no longer protecting anything).
 
 On every candle **close**:
 
@@ -102,8 +115,13 @@ is precisely a *liquidity sweep*, and Layer 2 will catch it as such. This distin
 - A new swing within `EqualLevelTicks` (default 3 ticks) of an existing unswept level is
   **merged** into it and the pool is flagged **EQH/EQL** (equal highs/lows), anchored at
   the extreme of the cluster and drawn thicker — clustered stops are a stronger magnet.
-- Only the `MaxLiquidityPerSide` (default 8) most recent unswept levels per side are
-  kept — old, distant liquidity is noise.
+- **Previous day and previous week extremes** are mapped as **PDH / PDL / PWH / PWL**
+  (`SessionLevelsEnabled`, default on) using the same bucket anchoring as the HTF
+  aggregator, so `DailyAnchorMinutes` shifts them to a futures session open. These are
+  the canonical ICT draws on liquidity — the levels every retail stop sits against — so
+  only the most recent per side is live, and they are **exempt from the per-side cull**.
+- Only the `MaxLiquidityPerSide` (default 8) most recent unswept *swing* levels per side
+  are kept — old, distant swing liquidity is noise.
 
 ### 3.2 Sweep detection (intrabar) and classification (on close)
 
@@ -179,11 +197,23 @@ An OB is only created when a **structure break** happens (Layer 1 fires BoS/MSS)
 2. **Origin candle:** walk back ≤ `ObLookback` (15) bars from the break candle to the
    *last opposite-colored candle* — last red before the bullish break, last green before
    the bearish one.
-3. **Displacement filter:** the impulse from that candle's extreme to the breaking close
-   must be ≥ **ATR₁₄ × `DisplacementAtrFactor`** (1.5). A structure break without
-   displacement is a grind, not an institutional entry — no OB is drawn. This filter
-   is what keeps the chart clean of the "every candle is an OB" clutter that plagues
-   retail SMC charts.
+3. **Displacement filter — two independent proofs, because raw distance is not
+   displacement:**
+   - *magnitude* — the impulse from that candle's extreme to the breaking close must be
+     ≥ **ATR₁₄ × `DisplacementAtrFactor`** (1.5);
+   - *velocity* — the leg must have left a genuine **3-candle imbalance** behind
+     (`RequireImbalanceForOb`, default on). An unfilled gap is ICT's own definition of a
+     move too fast for the book to keep up with.
+
+   Magnitude alone let a 15-bar grind covering 1.5 × ATR pass exactly like one violent
+   displacement candle — and because the distance is measured from wherever the OB
+   candle happens to sit, a *longer* `ObLookback` made the filter *easier*, which is
+   precisely backwards. Rejections are journaled as `ObRejected` with both numbers.
+   Together these keep the chart clean of the "every candle is an OB" clutter that
+   plagues retail SMC charts.
+
+   The **breaking candle itself is never a candidate**: the OB precedes the
+   displacement, and the move *is* that candle.
 
 ### 5.2 Zone construction & lifecycle
 
@@ -192,8 +222,26 @@ An OB is only created when a **structure break** happens (Layer 1 fires BoS/MSS)
 - Default mitigation = **BodyClose**: a wick punching through the OB does *not* kill
   it — that wick is often the stop-hunt into the zone that precedes the reversal. Only
   a candle **body closing beyond the far edge** invalidates the block.
-- Overlapping duplicates of the same type are suppressed; per-type caps keep at most
+- Duplicates are suppressed only when a same-kind active zone covers **substantially the
+  same territory** (≥70% of the smaller zone). Zones that merely graze each other are
+  kept: consecutive FVGs inside one impulse leg routinely touch, and in ICT a stacked
+  cluster is a *stronger* draw, not a duplicate — silently dropping them under-counted
+  the confluence stack the entry alert reports. Per-type caps keep at most
   `MaxZonesPerType` (25) active zones.
+
+### 5.3 Breaker blocks **[extension]**
+
+An order block that a candle **body closes through** has failed, and the participants
+trapped inside it defend it from the other side on the retest. The zone flips polarity —
+exactly the IFVG mechanic, applied to blocks:
+
+- violated **bullish** OB → **bearish breaker** (resistance);
+- violated **bearish** OB → **bullish breaker** (support).
+
+Each block breaks at most once. Breakers are full zones — own colours, `BRK` tag,
+touch-alerted, eligible for entry-model matches and confluence scoring like any other
+zone. This is the structure the entry model's trap-arming already assumed existed.
+Toggle: `BreakerBlocksEnabled` (default on).
 
 ---
 
@@ -222,6 +270,13 @@ An OB is only created when a **structure break** happens (Layer 1 fires BoS/MSS)
   2-tick technicality; every entry alert reports where the zone actually sat:
   `PD: Discount / Near EQ / Premium`. Buying deep in premium is paying retail prices —
   the exact mistake the cycle is designed to punish.
+- **OTE (optimal trade entry)** **[extension]** — the `OteMinPercent`–`OteMaxPercent`
+  band (0.618–0.79 by default) of the current impulse leg, ICT's refined entry pocket.
+  Drawn as a shaded band (`ShowOte`, on) and optionally enforced as an entry filter
+  (`OteFilterEnabled`, **off** by default — it is a genuine additional restriction).
+  It applies only when the leg direction matches the trade side, because a retracement
+  pocket is undefined against the leg, so it narrows entries without ever silently
+  muting a whole side. Vetoes journal as `EntryRejected` with the exact band.
 
 ---
 
@@ -269,10 +324,21 @@ remains available.
 
 ### 7.4 HTF detection
 
-The *same* FVG rule runs on the synthetic HTF series. HTF OBs use a displacement proxy
-(HTF candle range ≥ 1.3 × its 10-candle average, origin = last opposite HTF candle).
-HTF zones map back to the chart bar where the HTF candle began, draw with thicker
-borders/higher opacity, and are labeled `4H FVG▲`, `D OB▼`, etc.
+The *same* FVG rule runs on the synthetic HTF series, with its noise filter scaled to
+**that layer's own average range** — never the chart-TF ATR. Measuring a 4H gap against
+`0.15 × a 5m ATR` is no filter at all, so every micro-imbalance qualified as an "HTF
+FVG"; and because HTF zones drive the A+/A++ tier, that inflated the very tiering the
+analytics exist to compare.
+
+HTF order blocks need **both** displacement *and* a structure break, mirroring the
+chart-TF rule: the candle's range ≥ `HtfDisplacementFactor` × its 10-candle average
+**and** its close beyond the prior `HtfStructureLookback` candles' extreme. Size alone
+qualified before — and a wide-range HTF candle is very often a *reversal* (an engulfing
+top, a news spike), whose "last opposite candle" is not an institutional origin block
+at all.
+
+HTF zones map back to the chart bar where the HTF candle began, draw as gold 2px
+frames, and are labeled `4H FVG`, `D OB`, etc.
 
 **How to weigh them:** an LTF entry landing *inside* an HTF zone is the A+ setup. The
 HTF zone is the reason for the trade; the LTF zone is the trigger.
@@ -302,18 +368,54 @@ immediately (`CancelOnOppositeMss`, default on) and a ⚠️ *Failed MSS* alert 
 because a failed shift is itself one of the strongest seeds of the opposite setup (it is
 how breaker-block reversals form). The stale sweep priming is cleared with it.
 
-**Trap arming (`ArmOnFailedMss`, default on).** The traders trapped in the failed shift
-*are* the liquidity — so the failure itself counts as the sweep precursor and the new
-side is **auto-armed** on the spot. Sweep → MSS → failure → the opposite entry model is
-live immediately, typically resolving into a retest of an IFVG or breaker-style zone.
-Turn it off to require a literal BSL/SSL sweep on the new side before arming.
+**Trap arming (`ArmOnFailedMss`, default on) — and its budget.** The traders trapped in
+the failed shift *are* the liquidity, so the failure itself counts as the sweep
+precursor and the new side is **auto-armed** on the spot, typically resolving into a
+retest of an IFVG or breaker zone.
+
+Left unbounded, that hand-off **defeats `RequireSweepForEntry` entirely**. The model
+bootstraps itself: sweep → arm long → bearish MSS traps it → arm short *without a
+sweep* → bullish MSS traps that → arm long *without a sweep* → … And because the tracked
+trend flips on every alternating break, **every alternating break is an MSS**, so in a
+range the machine ping-pongs between sides indefinitely off one historical sweep — in
+exactly the chop the book tells you to avoid.
+
+`MaxTrapChainHops` (default 1) caps how many consecutive trap-arms may sit between an
+arming and a **real** liquidity sweep. Every arming records its `TrapDepth` in the
+journal, so `ArmSource=TrapArm` rows can be scored against genuine `Sweep` rows honestly.
+Set it to 0 to require a literal BSL/SSL sweep on the new side before arming.
 
 **Stage 3 — Entry: return to the footprint.**
-While armed, the **first tick** into *aligned* zones triggers the signal. Aligned =
-all of:
-- bullish zone (bullish OB or bullish FVG, LTF or HTF), formed before the current bar;
+While armed, the first tick that trades **through the proximal edge** of an *aligned*
+zone triggers the signal. Aligned = all of:
+- bullish zone (bullish OB, FVG, iFVG or breaker, LTF or HTF), formed before the current bar;
 - **unmitigated**;
-- midpoint at or below equilibrium + tolerance band — if PD alignment is on.
+- the candle actually **crossed the zone's entry edge this bar** — not merely "is in
+  contact with it";
+- midpoint at or below equilibrium + tolerance band — if PD alignment is on;
+- inside the OTE band — if the OTE filter is on;
+- inside a killzone — if the killzone filter is on.
+
+The edge-cross requirement is not pedantry. The test it replaced asked only whether the
+candle's low had reached the zone top, which stays true while price is anywhere *below*
+a bullish zone. FVGs self-healed (FullFill mitigation kills them in the same pass) but
+order blocks did not, because BodyClose mitigation can only be judged on a finished
+candle — so while price sliced *down* through a bullish OB, the block still counted as
+touched and a LONG could fire quoting an entry **above the market** with a stop price
+that had already traded. It then resolved in the journal as an ordinary −1R loss rather
+than as the malformed signal it was.
+
+Contact without an edge cross (price was already inside the zone when the model armed)
+is journaled as `EntryRejected` and **leaves the setup armed** for a clean re-entry.
+
+**Stage 4 — Killzone gate (`KillzoneFilterEnabled`, default off).** ICT is fundamentally
+time-based; entries fire only inside the configured `KillzoneWindows`
+(`02:00-05:00, 07:00-10:00, 13:30-16:00` by default — London, NY AM, NY PM in platform
+time). It ships **off** only because the correct clock times depend on your platform's
+timezone, which the indicator cannot know: set the windows to your chart's time, then
+turn it on. Outside a window the setup stays armed rather than being discarded, and the
+suppression is journaled once per bar. A malformed window string fails **open** — a typo
+must never silently mute every signal.
 
 **Confluence scoring.** All zones touched by that tick are collected and the setup is
 tiered: any Daily/Weekly zone in the stack → **A++** (🟢🟢🟢), any other HTF zone →
@@ -365,14 +467,14 @@ A++/A+/B behavior is completely unchanged.
 
 | Alert | Timing | Default |
 |---|---|---|
-| 💧 liquidity taken (side, EQH/EQL, next step hint) | tick of the cross | on |
-| 🎯 zone touch (zone id + expected reaction) | first tick into zone | on |
-| 📐 BoS / MSS (direction + meaning) | candle close | on |
-| 🟢/🔴 entry model (tiered, full trade plan + confluence + PD status) | tick of the return | on |
-| ⚠️ failed MSS (armed setup structurally invalidated) | candle close of the opposite MSS | on |
-| ❌ signal zone invalidated — the zone behind a still-open signal was consumed (exit/tighten cue) | tick for touch-based rules; candle close for BodyClose | on |
+| 🟢/🔴 entry model (tiered, full trade plan + confluence + PD status) | tick of the return | **on** |
+| 💧 liquidity taken (side, pool label, next step hint) | tick of the cross | off |
+| 🎯 zone touch (zone tag + expected reaction) | first tick into zone | off |
+| 📐 BoS / MSS (direction + meaning) | candle close | off |
+| ⚠️ failed MSS (armed setup structurally invalidated) | candle close of the opposite MSS | off |
+| ❌ signal zone invalidated — the zone behind a still-open signal was consumed (exit/tighten cue) | tick for touch-based rules; candle close for BodyClose | **on** |
 | 🔁 zone re-touched — info only, no trade plan (first-touch signals stay exclusive; episodes separated by ≥1 clean bar away) | tick of re-entry | off |
-| 🚨 exit warning — an OPEN signal is threatened: an opposing BoS/MSS printed, or displacement carved a fresh opposing zone; each threat class warns once per signal | candle close | on |
+| 🚨 exit warning — an OPEN signal is threatened: an opposing BoS/MSS printed, or displacement carved a fresh opposing zone; each threat class warns once per signal | candle close | **on** |
 | 📦 zone created | candle close | off |
 
 **Default delivery profile: Telegram-only, entries + exit warnings.** Popup alerts
@@ -445,16 +547,45 @@ mitigated/invalidated zones vanish instantly (kept briefly in data for the iFVG
 window and the journal); zones stop one bar past the live candle instead of smearing
 to the right edge; only the nearest `MaxVisibleZonesPerSide` unmitigated zones per
 side within `ZoneVisibilityAtrRange × ATR` render (HTF zones get double range so a
-fresh previous-day OB stays visible); HTF zones draw as gold frames rather than
-fills; labels are precisely centered on backdrop pills and auto-hide when they
-don't fit; only the last `MaxStructureLabels` BoS/MSS events and recently swept
-liquidity remain. `Detailed` mode disables culling for post-session review.
+fresh previous-day OB stays visible); HTF zones draw as gold 2px frames rather than
+fills; EQH/EQL pools and session extremes draw with a heavier stroke; MSS lines are
+solid and heavier while BoS lines stay dashed and light; labels are precisely centered
+on translucent backdrop pills and auto-hide when they don't fit; only the last
+`MaxStructureLabels` BoS/MSS events and recently swept liquidity remain. `Detailed`
+mode disables culling for post-session review.
+
+**Rendering is snapshot-based.** `OnRender` runs on the chart's drawing thread while
+`OnCalculate` runs on the data thread. The renderer never touches the engine's live
+collections: the calculation thread publishes an immutable `RenderModel` with one
+volatile write, and the renderer takes one volatile read and works from value types.
+Enumerating live `List<T>` state across threads is a real data race — not just
+"collection was modified", but torn reads of the backing array mid-resize, which can
+surface as a wrong price with no exception at all. `OnRender` is also wrapped in a
+catch-all: ATAS gives it no exception boundary, so a throw there degrades the chart for
+the rest of the session, and dropping one frame is always the better trade.
 
 **Journal.** Four CSVs per session under `Documents\ATAS\ICTSMC-Journal`:
 events (zone lifecycle, sweeps, structure, failed MSS), signals (full trade plan +
 arm source + confluence), outcomes (SL/TP2/TP3/Timeout with conservative SL-first
 resolution, R-multiple, MAE/MFE in R, bars held), and analytics (win-rate and
-expectancy grouped by zone family, layer, arm source, tier, direction). By default
+expectancy grouped by zone family, layer, arm source, tier, direction).
+
+**Excursion tracking includes the signal bar.** Signals fire *intrabar*, so skipping
+that bar hid the single most adverse stretch of a tap-and-fail: MAE came out
+systematically understated, and a same-bar stop-out was never recorded as one — it
+survived to resolve later as a timeout or even a win. The candle's extremes at the
+firing instant are captured on the record, and only excursion **beyond** them counts as
+the trade's own, so pre-entry price action on that bar is excluded in both directions.
+
+**Analytics are bounded and off-thread.** The report used to be rebuilt on the chart
+thread after *every* resolution — eight groupings over an unbounded, ever-growing pool,
+so cost per signal grew linearly and per session quadratically, with memory to match.
+The chart thread now only bounds the pool (`AnalyticsMaxSignals`, default 5000) and
+takes a shallow snapshot; grouping, formatting and the file write happen on the
+serialized IO chain, and a burst of resolutions coalesces into one rewrite. If trimming
+ever occurs it is stated in the file — `outcomes.csv` always stays complete.
+
+By default
 only LIVE rows are written (`Journal LIVE rows only`, on) — files stay lean and
 every row is a real-time event. Turning the toggle off makes the next
 recalculation regenerate the full HIST backfill: a deterministic backtest of the
@@ -499,7 +630,19 @@ point in the entry model writes an event with exact metrics:
 | `SweepExpired` | sweep aged out with no MSS | sweep bar, age vs window |
 | `RangeAnchored` | dealing range re-anchored on BoS/MSS | leg high/low with their bars, resulting EQ |
 | `FailedMSS` | armed setup structurally cancelled | cancelling MSS level, armed-at bar, bars in, window remaining, trap-arm result |
-| `ExitWarning` | open signal threatened (structure / opposing zone / opposing flow) | signal id + tier + source + trigger, entry, unrealized R at warning, exact threat metrics |
+| `ExitWarning` | open signal threatened (structure / opposing zone) | signal id + tier + source + trigger, entry, unrealized R at warning, exact threat metrics |
+| `ObRejected` | structure broke but no order block was drawn | leg bars, impulse distance vs ATR threshold, whether the leg left an imbalance |
+| `SessionLevel` | a PDH/PDL/PWH/PWL was registered | side, price, which session |
+| `ZoneBroken` | an order block was violated and flipped into a breaker | flipped zone id/tag and range |
+
+`EntryRejected` now also covers three new suppression reasons, each with its numbers:
+the **killzone** gate, the **OTE** band, and **contact without an edge cross** (price was
+already inside the zone when the model armed). `Armed` and `ArmRejected` additionally
+carry `TrapDepth` — how many failed-MSS hops that arming sits from a real sweep.
+
+`ExitWarning` rows are journaled whether or not the 🚨 alert is enabled. The alert toggle
+used to gate the whole check, so silencing the notification also destroyed the data that
+would have told you whether the notification was worth keeping.
 
 Every `ZoneTouch` is therefore classifiable post-hoc: fired / PD-vetoed /
 model-not-armed / model-expired — with the numbers to prove which. Subsequent
@@ -510,6 +653,19 @@ quality — does touch #2 reject or break through? — is measurable from the da
 
 - Swings confirm with a `SwingPeriod` lag; structure events therefore lag pivots. This
   is the cost of zero repainting.
+- **SMT divergence is not implemented.** It requires a second, correlated instrument's
+  series (ES vs NQ, EURUSD vs DXY), and this indicator is single-series by construction.
+  It is a genuine ICT gap, not an oversight — implementing it needs a data-subscription
+  design, not a filter.
+- Killzone times are **platform-local**. The indicator measures the bar timeframe from
+  the data but cannot know your platform's timezone, which is why the killzone filter
+  ships off: set `KillzoneWindows` to your chart's clock first.
+- The trap-arm budget bounds the ping-pong but there is still **no explicit
+  chop/consolidation detector**. In a genuinely rangebound market the model will produce
+  fewer signals than before, not zero — the killzone filter is the practical second
+  line of defence.
+- `Nullable` is left disabled project-wide. Null-safety here is by convention and
+  reviewed by hand, not enforced by the compiler.
 - The first HTF candle of loaded history can be partial if the history starts
   mid-bucket (true of any aggregator). Everything after is exact.
 - Synthetic HTF candles are built from loaded chart bars — load enough history for the
