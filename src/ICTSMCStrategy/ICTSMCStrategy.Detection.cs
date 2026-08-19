@@ -164,7 +164,7 @@ namespace ICTSMC
         /// </summary>
         private void RegisterLiquidity(SwingPoint swing, bool buySide)
         {
-            var tolerance = EqualLevelTicks * TickSize;
+            var tolerance = EqualLevelTicks * InstrumentTickSize;
 
             var existing = _liquidity.FirstOrDefault(l =>
                 !l.Swept && !l.IsSessionLevel && l.BuySide == buySide &&
@@ -518,7 +518,7 @@ namespace ICTSMC
         /// </summary>
         private bool LegHasImbalance(int obBar, int breakBar, bool bullish)
         {
-            var minGap = MinFvgTicks * TickSize;
+            var minGap = MinFvgTicks * InstrumentTickSize;
 
             for (var b = obBar + 2; b <= breakBar; b++)
             {
@@ -564,7 +564,7 @@ namespace ICTSMC
             var c0 = GetCandle(bar - 2);
             var c2 = GetCandle(bar);
 
-            var minSize = Math.Max(MinFvgTicks * TickSize, _atr * MinFvgAtrFraction);
+            var minSize = Math.Max(MinFvgTicks * InstrumentTickSize, _atr * MinFvgAtrFraction);
 
             if (c2.Low > c0.High && c2.Low - c0.High >= minSize)
             {
@@ -1060,7 +1060,7 @@ namespace ICTSMC
                 // drive the A+/A++ confluence tier, that inflated the tiering the whole
                 // analytics pipeline is built to compare.
                 var layerScale = agg.AverageRange(20);
-                var minSize = Math.Max(MinFvgTicks * TickSize, layerScale * MinFvgAtrFraction);
+                var minSize = Math.Max(MinFvgTicks * InstrumentTickSize, layerScale * MinFvgAtrFraction);
 
                 if (b.Low > a.High && b.Low - a.High >= minSize)
                 {

@@ -1,57 +1,57 @@
 @echo off
 REM ===========================================================================
-REM  Build ICTSMCStrategy.dll and copy it into a deploy folder.
+REM  Build ICTSMCStrategy.dll, copy it to a deploy folder, and install it into
+REM  the ATAS Indicators folder.
 REM
 REM    build.cmd
-REM        -> deploys to %USERPROFILE%\Desktop\IliaICTSMC
+REM        -> deploy copy in %USERPROFILE%\Desktop\IliaICTSMC, installs to ATAS
 REM    build.cmd "D:\deploy"
-REM        -> deploys there
-REM    build.cmd "D:\deploy" "C:\Program Files\ATAS X"
-REM        -> also pins the ATAS folder (use if auto-detection fails)
+REM    build.cmd "D:\deploy" "C:\Program Files (x86)\ATAS Platform"
+REM    build.cmd "D:\deploy" "" nocopy      -> build only, do not touch ATAS
 REM ===========================================================================
 setlocal
 
 set "OUTDIR=%~1"
 if "%OUTDIR%"=="" set "OUTDIR=%USERPROFILE%\Desktop\IliaICTSMC"
-
 set "ATASDIR=%~2"
+set "NOCOPY=%~3"
 
-REM ---- locate ATAS if it was not supplied -----------------------------------
+REM ---- locate the ATAS program folder --------------------------------------
 if not "%ATASDIR%"=="" goto :haveatas
-if exist "C:\Program Files\ATAS X\ATAS.Indicators.dll"            set "ATASDIR=C:\Program Files\ATAS X"
-if "%ATASDIR%"=="" if exist "C:\Program Files\ATAS Platform\ATAS.Indicators.dll"        set "ATASDIR=C:\Program Files\ATAS Platform"
-if "%ATASDIR%"=="" if exist "C:\Program Files (x86)\ATAS Platform\ATAS.Indicators.dll"  set "ATASDIR=C:\Program Files (x86)\ATAS Platform"
+if exist "C:\Program Files\ATAS X\ATAS.Indicators.dll"                       set "ATASDIR=C:\Program Files\ATAS X"
+if "%ATASDIR%"=="" if exist "C:\Program Files\ATAS Platform\ATAS.Indicators.dll"       set "ATASDIR=C:\Program Files\ATAS Platform"
+if "%ATASDIR%"=="" if exist "C:\Program Files (x86)\ATAS Platform\ATAS.Indicators.dll" set "ATASDIR=C:\Program Files (x86)\ATAS Platform"
 :haveatas
 
 if "%ATASDIR%"=="" (
   echo.
   echo   ERROR: could not find your ATAS installation.
-  echo.
   echo   ATAS must be installed on THIS machine - the indicator links against
   echo   ATAS.Indicators.dll and OFT.Rendering.dll from the ATAS program folder.
   echo.
-  echo   Pass the folder explicitly, e.g.
-  echo       build.cmd "%OUTDIR%" "C:\Program Files\ATAS X"
-  echo.
+  echo   Pass it explicitly:  build.cmd "%OUTDIR%" "C:\Program Files\ATAS X"
   exit /b 1
 )
 
-REM ---- ATAS X ships .NET 10 assemblies; older ATAS Platform is .NET 8 -------
-set "TFM=net10.0-windows"
-echo %ATASDIR% | find /i "ATAS X" >nul
-if errorlevel 1 set "TFM=net8.0-windows"
+REM ---- locate the ATAS Indicators folder -----------------------------------
+REM  Modern ATAS loads from Roaming AppData. Older layouts used Documents.
+set "INDDIR="
+if exist "%APPDATA%\ATAS\Indicators"            set "INDDIR=%APPDATA%\ATAS\Indicators"
+if "%INDDIR%"=="" if exist "%USERPROFILE%\Documents\ATAS\Indicators" set "INDDIR=%USERPROFILE%\Documents\ATAS\Indicators"
+if "%INDDIR%"=="" set "INDDIR=%APPDATA%\ATAS\Indicators"
 
 echo.
-echo   ATAS folder   : %ATASDIR%
-echo   Target        : %TFM%
-echo   Output folder : %OUTDIR%
+echo   ATAS program    : %ATASDIR%
+echo   ATAS indicators : %INDDIR%
+echo   Output folder   : %OUTDIR%
+echo.
+echo   (target framework is auto-detected from OFT.Platform.runtimeconfig.json)
 echo.
 
 where dotnet >nul 2>nul
 if errorlevel 1 (
   echo   ERROR: the .NET SDK is not installed / not on PATH.
-  echo   Download it from https://dotnet.microsoft.com/download
-  echo   You need the SDK matching %TFM%.
+  echo   Get it from https://dotnet.microsoft.com/download  ^(SDK, not Runtime^)
   exit /b 1
 )
 
@@ -59,26 +59,46 @@ if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 
 echo   Building...
 echo.
-dotnet build "%~dp0src\ICTSMCStrategy\ICTSMCStrategy.csproj" -c Release -p:AtasTfm=%TFM% -p:AtasPath="%ATASDIR%" -p:OutDir="%OUTDIR%\\"
+dotnet build "%~dp0src\ICTSMCStrategy\ICTSMCStrategy.csproj" -c Release -p:AtasPath="%ATASDIR%" -p:OutDir="%OUTDIR%\\"
 if errorlevel 1 (
   echo.
   echo   BUILD FAILED - see the error above.
-  echo   If it mentions a missing .NET %TFM% targeting pack, install that SDK version.
+  echo   If it mentions a missing targeting pack, install the matching .NET SDK
+  echo   ^(the line above starting "ICTSMC:" shows which framework was selected^).
   exit /b 1
 )
 
-echo.
 if not exist "%OUTDIR%\ICTSMCStrategy.dll" (
+  echo.
   echo   Build reported success but ICTSMCStrategy.dll is not in %OUTDIR%
   exit /b 1
 )
 
-echo   ================================================================
-echo    OK   ICTSMCStrategy.dll  ->  %OUTDIR%
-echo   ================================================================
 echo.
-echo   Install it by copying the DLL to:
-echo       %USERPROFILE%\Documents\ATAS\Indicators
-echo   then restart ATAS and add "ICT/SMC Strategy" (Order Flow category).
+echo   Built OK: %OUTDIR%\ICTSMCStrategy.dll
+
+if /i "%NOCOPY%"=="nocopy" goto :done
+
+REM ---- install into ATAS ---------------------------------------------------
+if not exist "%INDDIR%" mkdir "%INDDIR%"
+copy /y "%OUTDIR%\ICTSMCStrategy.dll" "%INDDIR%\ICTSMCStrategy.dll" >nul
+if errorlevel 1 (
+  echo.
+  echo   Could not copy into %INDDIR%
+  echo   ATAS is probably running and holding the old DLL. Close ATAS and re-run,
+  echo   or copy the file yourself.
+  exit /b 1
+)
+
+echo   Installed: %INDDIR%\ICTSMCStrategy.dll
+
+:done
+echo.
+echo   ================================================================
+echo    DONE
+echo   ================================================================
+echo   Restart ATAS, then add "ICT/SMC Strategy" (Order Flow category).
+echo   A restart is required - charts bound to the previous build keep the
+echo   old assembly until the indicator is re-added.
 echo.
 endlocal

@@ -113,7 +113,13 @@ run two ATAS terminals polling the same bot — Telegram allows one listener per
 
 ## Build & install
 
-Requirements: .NET 10 SDK (ATAS X) or .NET 8 SDK (older ATAS Platform), ATAS installed.
+Requirements: ATAS installed on the build machine, plus the .NET **SDK** matching the
+runtime your ATAS runs on.
+
+The project reads `OFT.Platform.runtimeconfig.json` from your ATAS folder and targets that
+framework automatically — the install *folder name* is not a reliable signal (an
+`(x86)\ATAS Platform` install can be running .NET 10). The build prints the resolved
+framework on a line starting `ICTSMC:`. Override with `-p:AtasTfm=net8.0-windows` if needed.
 
 **One command (Windows)** — builds Release and drops `ICTSMCStrategy.dll` into the deploy
 folder (defaults to `%USERPROFILE%\Desktop\IliaICTSMC`):
@@ -124,8 +130,19 @@ build.cmd "C:\Users\Ilia\Desktop\IliaICTSMC"
 build.cmd "C:\Users\Ilia\Desktop\IliaICTSMC" "C:\Program Files\ATAS X"
 ```
 
-Then copy the DLL into `%USERPROFILE%\Documents\ATAS\Indicators`, restart ATAS, and add
-**ICT/SMC Strategy** from the *Order Flow* category.
+`build.cmd` also installs the DLL into the ATAS **Indicators** folder for you and prints
+which one it used. Restart ATAS afterwards, then add **ICT/SMC Strategy** from the
+*Order Flow* category.
+
+> **Where the Indicators folder actually is.** Modern ATAS loads custom indicators from
+> `%APPDATA%\ATAS\Indicators` (i.e. `C:\Users\<you>\AppData\Roaming\ATAS\Indicators`),
+> **not** from `Documents`. Some older layouts used `%USERPROFILE%\Documents\ATAS\Indicators`.
+> `build.cmd` prefers the Roaming path and falls back to Documents only if that is the one
+> that already exists. If you copy the DLL by hand and the indicator never appears, you
+> almost certainly used the wrong one of these two.
+>
+> The **journal** output is unrelated to this and goes to
+> `%USERPROFILE%\Documents\ATAS\ICTSMC-Journal` (configurable in settings → *11. Journal*).
 
 Manual equivalents:
 
@@ -141,7 +158,8 @@ dotnet build src/ICTSMCStrategy/ICTSMCStrategy.csproj -c Release -p:AtasTfm=net8
 ```
 
 Copy `src/ICTSMCStrategy/bin/Release/ICTSMCStrategy.dll` into
-`%USERPROFILE%\Documents\ATAS\Indicators`, restart ATAS, and add
+the ATAS Indicators folder (see the note above — normally
+`%APPDATA%\ATAS\Indicators`), restart ATAS, and add
 **“ICT/SMC Strategy”** (Order Flow category) to the chart.
 
 > Upgrading from a build older than the rename? Delete the old `IctSmcZones.dll`

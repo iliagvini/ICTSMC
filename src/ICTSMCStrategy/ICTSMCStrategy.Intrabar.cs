@@ -607,7 +607,7 @@ namespace ICTSMC
                 ? matches.OrderByDescending(z => z.Top).First()
                 : matches.OrderBy(z => z.Bottom).First();
 
-            var buffer = SlBufferTicks * TickSize;
+            var buffer = SlBufferTicks * InstrumentTickSize;
             decimal entry, sl;
 
             if (longSide)
@@ -748,7 +748,7 @@ namespace ICTSMC
                 ? $"PD override: zone mid {FormatPrice(zone.Mid)} beyond EQ limit"
                 : "no sweep→MSS chain";
 
-            var buffer = SlBufferTicks * TickSize;
+            var buffer = SlBufferTicks * InstrumentTickSize;
             var entry = longSide ? zone.Top : zone.Bottom;
             var sl = longSide ? zone.Bottom - buffer : zone.Top + buffer;
             var risk = Math.Abs(entry - sl);

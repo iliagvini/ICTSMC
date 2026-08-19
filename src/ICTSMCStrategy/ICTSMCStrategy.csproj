@@ -6,6 +6,23 @@
       net10.0-windows by default. For an older .NET 8-based ATAS install,
       build with: dotnet build -p:AtasTfm=net8.0-windows
     -->
+    <!-- ATAS install folder: pass /p:AtasPath=... to override; ATAS X is probed first. -->
+    <AtasPath Condition="'$(AtasPath)' == '' AND Exists('C:\Program Files\ATAS X')">C:\Program Files\ATAS X</AtasPath>
+    <AtasPath Condition="'$(AtasPath)' == '' AND Exists('C:\Program Files\ATAS Platform')">C:\Program Files\ATAS Platform</AtasPath>
+    <AtasPath Condition="'$(AtasPath)' == ''">C:\Program Files (x86)\ATAS Platform</AtasPath>
+
+    <!--
+      Pick the target framework from the runtime ATAS ACTUALLY runs on, read out of
+      its own runtimeconfig.json. The install FOLDER NAME is not a reliable signal:
+      an "(x86)\ATAS Platform" install can be running .NET 10, and guessing net8 for
+      it produces a DLL built against the wrong framework. Override with
+      -p:AtasTfm=netX.0-windows if you need to force it.
+    -->
+    <AtasRuntimeConfig>$(AtasPath)\OFT.Platform.runtimeconfig.json</AtasRuntimeConfig>
+    <AtasRuntimeConfigText Condition="'$(AtasTfm)' == '' AND Exists('$(AtasRuntimeConfig)')">$([System.IO.File]::ReadAllText('$(AtasRuntimeConfig)'))</AtasRuntimeConfigText>
+    <AtasTfm Condition="'$(AtasTfm)' == '' AND '$(AtasRuntimeConfigText)' != '' AND $(AtasRuntimeConfigText.Contains('net10.0'))">net10.0-windows</AtasTfm>
+    <AtasTfm Condition="'$(AtasTfm)' == '' AND '$(AtasRuntimeConfigText)' != '' AND $(AtasRuntimeConfigText.Contains('net9.0'))">net9.0-windows</AtasTfm>
+    <AtasTfm Condition="'$(AtasTfm)' == '' AND '$(AtasRuntimeConfigText)' != '' AND $(AtasRuntimeConfigText.Contains('net8.0'))">net8.0-windows</AtasTfm>
     <AtasTfm Condition="'$(AtasTfm)' == ''">net10.0-windows</AtasTfm>
     <TargetFramework>$(AtasTfm)</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
@@ -13,10 +30,6 @@
     <Nullable>disable</Nullable>
     <AssemblyName>ICTSMCStrategy</AssemblyName>
     <RootNamespace>ICTSMC</RootNamespace>
-    <!-- ATAS install folder: pass /p:AtasPath=... to override; ATAS X is probed first. -->
-    <AtasPath Condition="'$(AtasPath)' == '' AND Exists('C:\Program Files\ATAS X')">C:\Program Files\ATAS X</AtasPath>
-    <AtasPath Condition="'$(AtasPath)' == '' AND Exists('C:\Program Files\ATAS Platform')">C:\Program Files\ATAS Platform</AtasPath>
-    <AtasPath Condition="'$(AtasPath)' == ''">C:\Program Files (x86)\ATAS Platform</AtasPath>
     <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
