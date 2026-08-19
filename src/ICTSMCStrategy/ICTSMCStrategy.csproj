@@ -25,6 +25,22 @@
     <AtasTfm Condition="'$(AtasTfm)' == '' AND '$(AtasRuntimeConfigText)' != '' AND $(AtasRuntimeConfigText.Contains('net8.0'))">net8.0-windows</AtasTfm>
     <AtasTfm Condition="'$(AtasTfm)' == ''">net10.0-windows</AtasTfm>
     <TargetFramework>$(AtasTfm)</TargetFramework>
+    <!--
+      UseWindowsForms is here ONLY to pull in System.Drawing.Common (Bitmap, Graphics,
+      Pen, Brush, Font) for the self-rendered chart snapshot. No WinForms and no WPF type
+      is used anywhere in this project.
+
+      Expect one warning on every build:
+        MSB3277: conflicts between different versions of "WindowsBase" (v4.0.0.0 vs v10.0.0.0)
+      That conflict is entirely between ATAS.Indicators.dll's own reference and the
+      WindowsDesktop reference pack. This assembly neither references nor ships WindowsBase,
+      and at runtime ATAS resolves it from the WPF assemblies its process has already
+      loaded. It is expected, and it is not a defect to chase.
+
+      Do NOT "fix" it by switching UseWindowsForms off or adding a System.Drawing.Common
+      PackageReference without testing the built DLL inside ATAS first - that trades a
+      cosmetic warning for a real dependency-resolution risk in the host process.
+    -->
     <UseWindowsForms>true</UseWindowsForms>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>

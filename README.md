@@ -83,6 +83,26 @@ If you have run an earlier build, these change what fires:
   built under the old rules.
 - **MAE/MFE now include the signal bar**, so historical stats are stricter (and honest).
 
+### Expected build warning
+
+Every build prints one `MSB3277`: a `WindowsBase` v4.0.0.0 vs v10.0.0.0 conflict. **This is
+expected and harmless.** The conflict is between `ATAS.Indicators.dll`'s own reference and
+the WindowsDesktop reference pack — this project uses no WPF and no WinForms type at all
+(`UseWindowsForms` is set only to pull in `System.Drawing.Common` for the chart snapshot),
+so the built DLL neither references nor ships `WindowsBase`, and ATAS resolves it from the
+WPF assemblies already loaded in its process.
+
+You can confirm it on your own build:
+
+```powershell
+[Reflection.Assembly]::LoadFrom("$env:APPDATA\ATAS\Indicators\ICTSMCStrategy.dll").GetReferencedAssemblies() |
+  Select-Object Name, Version | Sort-Object Name
+```
+
+`WindowsBase` should not appear in that list. Don't "fix" the warning by changing
+`UseWindowsForms` without testing the resulting DLL inside ATAS — see the comment in the
+csproj.
+
 ### Telegram setup
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) → copy the **bot token**.
@@ -121,13 +141,14 @@ framework automatically — the install *folder name* is not a reliable signal (
 `(x86)\ATAS Platform` install can be running .NET 10). The build prints the resolved
 framework on a line starting `ICTSMC:`. Override with `-p:AtasTfm=net8.0-windows` if needed.
 
-**One command (Windows)** — builds Release and drops `ICTSMCStrategy.dll` into the deploy
-folder (defaults to `%USERPROFILE%\Desktop\IliaICTSMC`):
+**One command (Windows)** — builds Release into `<repo>\dist` and installs the DLL into
+your ATAS Indicators folder:
 
 ```bat
 build.cmd
-build.cmd "C:\Users\Ilia\Desktop\IliaICTSMC"
-build.cmd "C:\Users\Ilia\Desktop\IliaICTSMC" "C:\Program Files\ATAS X"
+build.cmd "D:\my-deploy-folder"
+build.cmd "D:\my-deploy-folder" "C:\Program Files (x86)\ATAS Platform"
+build.cmd "" "" nocopy          REM build only, leave ATAS untouched
 ```
 
 `build.cmd` also installs the DLL into the ATAS **Indicators** folder for you and prints
