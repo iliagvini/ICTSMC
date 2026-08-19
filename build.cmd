@@ -4,7 +4,7 @@ REM  Build ICTSMCStrategy.dll, copy it to a deploy folder, and install it into
 REM  the ATAS Indicators folder.
 REM
 REM    build.cmd
-REM        -> deploy copy in %USERPROFILE%\Desktop\IliaICTSMC, installs to ATAS
+REM        -> staging copy in <repo>\dist, then installs into ATAS
 REM    build.cmd "D:\deploy"
 REM    build.cmd "D:\deploy" "C:\Program Files (x86)\ATAS Platform"
 REM    build.cmd "D:\deploy" "" nocopy      -> build only, do not touch ATAS
@@ -12,7 +12,9 @@ REM ===========================================================================
 setlocal
 
 set "OUTDIR=%~1"
-if "%OUTDIR%"=="" set "OUTDIR=%USERPROFILE%\Desktop\IliaICTSMC"
+REM Default to <repo>\dist. Defaulting to a folder the user is likely to be working
+REM in scattered ICTSMCStrategy.dll/.pdb/.deps.json loose among their own files.
+if "%OUTDIR%"=="" set "OUTDIR=%~dp0dist"
 set "ATASDIR=%~2"
 set "NOCOPY=%~3"
 
