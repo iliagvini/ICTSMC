@@ -312,18 +312,46 @@ remains available.
 - HTF candles are built by truncating candle open-times from **absolute ticks**, so a
   layer never drifts. With the default anchor of 0 a 4H bucket starts 00/04/08/12/16/20,
   daily at midnight, weekly Monday 00:00 (.NET tick zero is a Monday).
-- **The session anchor applies to EVERY layer, not just daily and above.** This matters
-  more than it sounds. Bucket *phase* is not a detail: measured on identical price data,
-  shifting the 4H buckets by two hours changed **100% of the detected 4H FVG
-  boundaries** — same prices, same rules, a completely different set of gaps. A
-  session-based instrument (futures opening 18:00) whose HTF layers are hard-anchored to
-  midnight therefore produces 4H zones that do not exist on the platform's own H4 chart.
-  Set `Session anchor` so the synthetic buckets line up with your platform's HTF candles.
+- **Bucket phase is not a detail.** Measured on identical price data, shifting the 4H
+  buckets by two hours changed **100% of the detected 4H FVG boundaries** — same prices,
+  same rules, a completely different set of gaps. The synthetic buckets have to land where
+  the platform's own HTF candles land.
 
-  **How to find your value:** open the HTF chart, read any candle's open time, convert to
-  minutes after midnight, and take it modulo the layer size. H4 candles opening at
-  01:00/05:00/09:00… → `60 mod 240` = **60**. Candles opening on the even 4-hour marks →
-  **0** (the default).
+- **Intraday and daily layers have SEPARATE anchors, and both default to 0.**
+  `Intraday HTF anchor` drives 15m/1H/4H; `Daily/Weekly anchor` drives D and W. They are
+  independent because an instrument can have clock-aligned intraday bars and a
+  session-based daily at the same time — forcing one anchor to serve both would mean
+  fixing the daily breaks the 4H.
+
+  **ATAS is clock-aligned intraday** (4H candles open 00:00/04:00/08:00/12:00/16:00/20:00,
+  1H on the hour), so the shipped default of `0` is already correct and needs no change.
+  Verified: at the defaults the engine's buckets open at exactly those times, and setting
+  the daily anchor to 1080 (18:00) moves only the D layer, leaving 1H and 4H untouched.
+
+  Change `Intraday HTF anchor` only if your platform offsets intraday bars (read any HTF
+  candle's open time in minutes after midnight, modulo the layer size).
+
+- **The daily boundary detects itself** (`Daily/Weekly anchor mode` = Auto, default). It
+  finds where the trading day starts from the recurring gap in bar timestamps — the daily
+  maintenance break every futures contract has; the bar opening straight after that gap
+  opens the session.
+
+  This is measured rather than configured because **the right value is not constant**.
+  GC's session opens 17:00 Chicago, which on a UTC+2 chart is **00:00 in US summer and
+  01:00 in US winter**. An anchor set by hand in August is silently an hour wrong from
+  November onward, and takes every PDH/PDL/PWH/PWL with it. Only ~30 days of history are
+  scanned, so the window never straddles a daylight-saving change.
+
+  Detection is deliberately conservative: several gaps must agree, or it falls back to the
+  calendar day. A 24/7 instrument with no session break correctly yields 0. The result is
+  shown on the HTF badge (`day=01:00 (session gap, 28/31)`) and journaled as
+  `SessionAnchor`, so it is always verifiable rather than magic. Switch the mode to Manual
+  to pin it yourself. This anchor governs the D/W layers and PDH/PDL/PWH/PWL.
+
+  **Known limitation:** weekly buckets are anchored off the same value, which places the
+  week's start on Monday at the session time. A futures week actually opens Sunday evening,
+  so the W layer can be a day out on session-anchored instruments. The D layer and
+  PDH/PDL are unaffected.
 - On configuration the aggregators are **retro-fed the entire loaded history**, making
   HTF zones *path-independent*: identical whether the chart was just opened or watched
   live all day.
