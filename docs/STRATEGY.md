@@ -111,11 +111,13 @@ entries inside an HTF zone are the highest-quality setups.
   (`HtfAggregator.AverageRange`), never the chart-TF ATR. Measuring a 4H gap against
   0.15 × a 5m ATR was no filter at all, and because HTF zones drive the A+/A++ tier,
   that inflated the very tiering the analytics exist to compare.
-- **HTF order blocks require a structure break too** (`Detection.cs → HtfBrokeStructure`):
-  the displacement candle must close beyond the prior `HtfStructureLookback` candles'
-  extreme. Size alone qualified before — and a wide-range candle is very often a
-  *reversal* (an engulfing top, a news spike), whose “last opposite candle” is not an
-  institutional origin block at all.
+- **HTF order blocks run the real structure engine** (`Detection.cs → UpdateHtfStructure`,
+  `CreateHtfOrderBlock`), not a proxy. Each layer keeps its own ATR, fractal swings and
+  protected-swing state, and an OB requires a close beyond the protected swing plus the
+  same magnitude and imbalance proofs the chart timeframe demands. The previous shortcut
+  used a Donchian rolling-extreme breakout as its "structure break", which fires where no
+  swing exists. Verified: an M15 chart with a 4H layer now reproduces a native 4H chart's
+  FVGs, iFVGs and OBs with identical counts and identical boundaries.
 
 ### Auto HTF selection
 
@@ -127,10 +129,13 @@ entries inside an HTF zone are the highest-quality setups.
 - Ladder: `≤1m → 15m (+1H)`, `≤5m → 1H (+4H)`, `6m–1H → 4H (+D)`, `2H–4H → D (+W)`,
   `>4H → W`. The chosen HTF is guaranteed to sit strictly above the chart TF; a second
   layer is optional (`AutoSecondLayer`).
-- Buckets are truncated from absolute ticks, so they always align to clock boundaries
-  (:00 for 1H, 00:00 for D, Monday 00:00 for W — .NET tick zero is a Monday). Daily and
-  weekly buckets can be shifted with `DailyAnchorMinutes` to match a futures session
-  open (e.g. 1080 = 18:00 platform time).
+- Buckets are truncated from absolute ticks, so they never drift. `DailyAnchorMinutes`
+  shifts **every** layer (not just daily+) to match a session open — critical on futures,
+  because a two-hour bucket phase shift changes 100% of the detected 4H FVG boundaries.
+- HTF zones are mitigated/inverted on **their own layer's candle bodies**
+  (`Detection.cs → ApplyHtfBodyClose`); wick-based rules stay intrabar on chart bars.
+  Mitigated HTF zones are retained for four candles of their own layer so the layer's
+  body-close pass can still reach them.
 - On configuration the aggregators are **retro-fed the entire chart history**, so HTF
   zones are identical whether you loaded the chart fresh or watched it live all day —
   no path dependence.

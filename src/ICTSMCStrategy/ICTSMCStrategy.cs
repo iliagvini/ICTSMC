@@ -59,6 +59,8 @@ namespace ICTSMC
         private bool _htfConfigured;
         private string _htfInfo = "";
         private string _chartTfLabel = "";
+        /// <summary>Measured chart timeframe in minutes; scales HTF-relative windows.</summary>
+        private int _chartMinutes;
 
         // Previous-session liquidity (PDH/PDL/PWH/PWL) bookkeeping.
         private DateTime _currentDayBucket = DateTime.MinValue;
@@ -86,6 +88,11 @@ namespace ICTSMC
         // Entry-model state machine
         private int _pendingBullSweepBar = -1;  // sell-side liquidity was swept (long setup precursor)
         private int _pendingBearSweepBar = -1;  // buy-side liquidity was swept (short setup precursor)
+        // The level that primed each side. Kept so arming can ask whether that liquidity
+        // event was a TRAP (closed back inside) or a RUN (closed through) — an ICT
+        // reversal is seeded by the former, never the latter.
+        private LiquidityLevel _pendingBullSweepLevel;
+        private LiquidityLevel _pendingBearSweepLevel;
         private int _armedBullUntil = -1;
         private int _armedBearUntil = -1;
         private int _armedBullAtBar = -1;
@@ -455,7 +462,7 @@ namespace ICTSMC
             set => Set(ref _autoSecondLayer, value);
         }
 
-        [Display(GroupName = GrpHtf, Name = "Daily+ anchor (minutes after midnight)", Order = 714)]
+        [Display(GroupName = GrpHtf, Name = "Session anchor for ALL HTF layers (minutes after midnight)", Order = 714)]
         [Range(0, 1439)]
         public int DailyAnchorMinutes
         {
@@ -480,7 +487,7 @@ namespace ICTSMC
         }
 
         private decimal _htfDisplacementFactor = 1.3m;
-        [Display(GroupName = GrpHtf, Name = "HTF displacement (avg range ×)", Order = 740)]
+        [Display(GroupName = GrpHtf, Name = "HTF displacement (legacy — unused; OBs now use the ATR × filter)", Order = 740)]
         [Range(0, 10)]
         public decimal HtfDisplacementFactor
         {
@@ -489,7 +496,7 @@ namespace ICTSMC
         }
 
         private int _htfStructureLookback = 5;
-        [Display(GroupName = GrpHtf, Name = "HTF structure lookback (candles)", Order = 742)]
+        [Display(GroupName = GrpHtf, Name = "HTF structure lookback (legacy — unused; swing structure is used)", Order = 742)]
         [Range(2, 30)]
         public int HtfStructureLookback
         {
@@ -522,6 +529,14 @@ namespace ICTSMC
         {
             get => _entryModelEnabled;
             set => Set(ref _entryModelEnabled, value);
+        }
+
+        private bool _requireTrapForEntry = true;
+        [Display(GroupName = GrpSignal, Name = "Sweep must be a TRAP, not a run", Order = 812)]
+        public bool RequireTrapForEntry
+        {
+            get => _requireTrapForEntry;
+            set => Set(ref _requireTrapForEntry, value);
         }
 
         private bool _requireSweepForEntry = true;
@@ -795,6 +810,7 @@ namespace ICTSMC
             _htfConfigured = false;
             _htfInfo = "";
             _chartTfLabel = "";
+            _chartMinutes = 0;
             _currentDayBucket = DateTime.MinValue;
             _currentWeekBucket = DateTime.MinValue;
             _dayHigh = _dayLow = _weekHigh = _weekLow = 0m;
@@ -810,6 +826,8 @@ namespace ICTSMC
             _realtime = false;
             _pendingBullSweepBar = -1;
             _pendingBearSweepBar = -1;
+            _pendingBullSweepLevel = null;
+            _pendingBearSweepLevel = null;
             _armedBullUntil = -1;
             _armedBearUntil = -1;
             _armedBullAtBar = -1;

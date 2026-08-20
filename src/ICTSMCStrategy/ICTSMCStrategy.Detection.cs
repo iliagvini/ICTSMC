@@ -25,6 +25,7 @@ namespace ICTSMC
                 return;
 
             UpdateAtr(bar);
+            ClassifyFinishedSweeps(bar);
             ConfirmSwings(bar);
             DetectStructureBreak(bar);
             UpdateLegExtreme(bar);
@@ -664,6 +665,29 @@ namespace ICTSMC
                 if (zone.StartBar >= bar)
                     continue;
 
+                // HTF zones are judged on HTF candle bodies, in ApplyHtfBodyClose.
+                // Using the chart candle here meant a 4H gap could be inverted by a
+                // single 15-minute body close - 16 chances per 4H candle instead of one,
+                // and a transient dip a real 4H candle would have absorbed as a wick.
+                if (zone.IsHtf)
+                    continue;
+
+                ApplyBodyCloseToZone(zone, bodyLow, bodyHigh, bar, bar - 3, flipped);
+            }
+
+            CommitFlippedZones(flipped, bar, "");
+
+        }
+
+        /// <summary>
+        /// Body-close semantics for one zone: BodyClose mitigation, FVG inversion and
+        /// order-block breakers. Shared by the chart-timeframe pass and the per-layer HTF
+        /// pass so both apply identical rules - the only difference is WHOSE candle body
+        /// is handed in.
+        /// </summary>
+        private void ApplyBodyCloseToZone(Zone zone, decimal bodyLow, decimal bodyHigh, int bar,
+            int flipFloorBar, List<Zone> flipped)
+        {
                 var rule = zone.IsOrderBlock ? ObMitigation : FvgMitigation;
                 if (zone.State != ZoneState.Mitigated && rule == MitigationRule.BodyClose)
                 {
@@ -678,7 +702,7 @@ namespace ICTSMC
                 // gap now, or within a few bars of a wick-based mitigation.
                 if (IfvgEnabled && !zone.Inverted &&
                     zone.Type is ZoneType.BullFvg or ZoneType.BearFvg &&
-                    (zone.State != ZoneState.Mitigated || (zone.EndBar.HasValue && bar - zone.EndBar.Value <= 3)))
+                    (zone.State != ZoneState.Mitigated || (zone.EndBar.HasValue && zone.EndBar.Value >= flipFloorBar)))
                 {
                     if (zone.Type == ZoneType.BullFvg && bodyLow < zone.Bottom)
                     {
@@ -704,7 +728,7 @@ namespace ICTSMC
                 // entry model's trap-arming already assumes exists.
                 if (BreakerBlocksEnabled && !zone.BreakerSpawned &&
                     zone.Type is ZoneType.BullOrderBlock or ZoneType.BearOrderBlock &&
-                    (zone.State != ZoneState.Mitigated || (zone.EndBar.HasValue && bar - zone.EndBar.Value <= 3)))
+                    (zone.State != ZoneState.Mitigated || (zone.EndBar.HasValue && zone.EndBar.Value >= flipFloorBar)))
                 {
                     if (zone.Type == ZoneType.BullOrderBlock && bodyLow < zone.Bottom)
                     {
@@ -723,22 +747,101 @@ namespace ICTSMC
                         flipped.Add(BuildFlip(zone, ZoneType.BullBreaker, bar));
                     }
                 }
-            }
+        }
 
+        /// <summary>Commits polarity flips produced by a body-close pass and journals them.</summary>
+        private void CommitFlippedZones(List<Zone> flipped, int bar, string layerNote)
+        {
             foreach (var zone in flipped)
             {
                 AddZone(zone);
 
                 var isBreaker = zone.Type is ZoneType.BullBreaker or ZoneType.BearBreaker;
                 JournalEvent(bar, isBreaker ? "ZoneBroken" : "ZoneInverted", zone.IsBullish ? "Bull" : "Bear", zone, 0m,
-                    isBreaker
-                        ? "Order block violated — flipped into a breaker"
-                        : "FVG flipped polarity (body close through)");
+                    (isBreaker
+                        ? "Order block violated - flipped into a breaker"
+                        : "FVG flipped polarity (body close through)") + layerNote);
+            }
+        }
+
+        /// <summary>How many chart candles make up one candle of this HTF layer.</summary>
+        private int BarsPerHtfCandle(HtfAggregator agg) =>
+            _chartMinutes > 0 ? Math.Max(1, agg.Minutes / _chartMinutes) : 1;
+
+        /// <summary>
+        /// Body-close pass for ONE higher-timeframe layer, run when that layer's candle
+        /// closes and judged on THAT candle's body.
+        ///
+        /// A 4H fair value gap is broken when a 4H candle body closes through it - not
+        /// when some 15-minute candle does. Running the chart-timeframe pass over HTF
+        /// zones gave a 4H gap sixteen inversion opportunities per 4H candle on an M15
+        /// chart, and let a brief dip that a real 4H candle would have absorbed as a wick
+        /// flip the zone permanently. That is why an M15 chart showed 4H iFVGs a genuine
+        /// H4 chart never produced.
+        /// </summary>
+        private void ApplyHtfBodyClose(HtfAggregator agg)
+        {
+            var n = agg.Candles.Count;
+            if (n == 0)
+                return;
+
+            var closed = agg.Candles[n - 1];
+            var bodyLow = Math.Min(closed.Open, closed.Close);
+            var bodyHigh = Math.Max(closed.Open, closed.Close);
+
+            // The "recently wick-mitigated" window is the same 4-candle inclusive span the
+            // chart-timeframe rule uses (bar-3 .. bar), but anchored to REAL candle
+            // boundaries of this layer rather than approximated as bars-per-candle. The
+            // approximation drifted whenever a zone was wick-filled part-way through a
+            // candle, which let an HTF gap invert on a candle a native chart of that
+            // timeframe would not have counted.
+            var flipFloorBar = agg.Candles[Math.Max(0, n - 4)].FirstChartBar;
+            var flipped = new List<Zone>();
+
+            foreach (var zone in _zones)
+            {
+                if (!zone.IsHtf || zone.HtfLabel != agg.Label)
+                    continue;
+
+                // Never judged by the candle it was born from.
+                if (zone.StartBar >= closed.FirstChartBar)
+                    continue;
+
+                ApplyBodyCloseToZone(zone, bodyLow, bodyHigh, _lastSeenBar, flipFloorBar, flipped);
             }
 
-            // Classify finished sweeps: close back inside = trap, close through = run.
-            foreach (var level in _liquidity.Where(l => l.Swept && l.SweptBar == bar && l.WasTrap == null))
-                level.WasTrap = level.BuySide ? candle.Close < level.Price : candle.Close > level.Price;
+            CommitFlippedZones(flipped, _lastSeenBar, $" [{agg.Label} candle close]");
+        }
+
+        /// <summary>
+        /// The HTF equivalent of LegHasImbalance: the displacement leg on the HTF series
+        /// must itself have left an unfilled 3-candle gap.
+        /// </summary>
+        private bool HtfLegHasImbalance(List<HtfCandle> candles, int obIndex, int lastIndex, bool bullish)
+        {
+            var minGap = MinFvgTicks * InstrumentTickSize;
+
+            for (var b = obIndex + 2; b <= lastIndex; b++)
+            {
+                if (b - 2 < 0)
+                    continue;
+
+                var a = candles[b - 2];
+                var c = candles[b];
+
+                if (bullish)
+                {
+                    if (c.Low > a.High && c.Low - a.High >= minGap)
+                        return true;
+                }
+                else
+                {
+                    if (c.High < a.Low && a.Low - c.High >= minGap)
+                        return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>A flipped copy of <paramref name="source"/> covering the same territory.</summary>
@@ -752,6 +855,28 @@ namespace ICTSMC
             Top = source.Top,
             Bottom = source.Bottom
         };
+
+        /// <summary>
+        /// Classifies sweeps that finished on this candle: closed back inside the level =
+        /// TRAP (the manipulation ICT trades), closed through = RUN (a real breakout).
+        ///
+        /// Runs BEFORE structure detection on purpose. The entry model consults this
+        /// classification when it decides whether a sweep may arm a reversal, and a sweep
+        /// and the MSS that follows it can land on the SAME candle - so the verdict has to
+        /// exist before DetectStructureBreak asks for it.
+        /// </summary>
+        private void ClassifyFinishedSweeps(int bar)
+        {
+            var close = GetCandle(bar).Close;
+
+            foreach (var level in _liquidity)
+            {
+                if (!level.Swept || level.SweptBar != bar || level.WasTrap != null)
+                    continue;
+
+                level.WasTrap = level.BuySide ? close < level.Price : close > level.Price;
+            }
+        }
 
         private void Mitigate(Zone zone, int bar)
         {
@@ -777,14 +902,34 @@ namespace ICTSMC
             }
         }
 
+        /// <summary>
+        /// How long a mitigated zone stays in the data. HTF zones are retained for at least
+        /// four candles OF THEIR OWN LAYER, so the layer's body-close pass can still reach
+        /// them (flip window is three).
+        /// </summary>
+        private int MitigatedRetentionBars(Zone zone)
+        {
+            if (!zone.IsHtf || zone.HtfMinutes <= 0 || _chartMinutes <= 0)
+                return KeepMitigatedBars;
+
+            var barsPerHtfCandle = Math.Max(1, zone.HtfMinutes / _chartMinutes);
+            return Math.Max(KeepMitigatedBars, 4 * barsPerHtfCandle);
+        }
+
         private void Prune(int bar)
         {
             // Mitigated zones vanish from RENDERING immediately (unless ShowMitigated),
             // but stay in the data for KeepMitigatedBars — the iFVG/breaker engine needs
-            // the broken zone for its 3-bar flip window, and the journal needs the id.
+            // the broken zone for its flip window, and the journal needs the id.
+            //
+            // HTF zones need a LONGER stay, measured in their own candles. KeepMitigatedBars
+            // is counted in CHART bars: on an M15 chart that is 10 bars = 2.5 hours, while a
+            // 4H candle only closes every 16 bars. A filled 4H gap was therefore pruned
+            // before its own layer's candle had a chance to close on it, so it could never
+            // invert and 4H iFVGs simply never appeared.
             _zones.RemoveAll(z =>
                 z.State == ZoneState.Mitigated &&
-                bar - (z.EndBar ?? bar) > KeepMitigatedBars);
+                bar - (z.EndBar ?? bar) > MitigatedRetentionBars(z));
 
             if (_structure.Count > 150)
                 _structure.RemoveRange(0, _structure.Count - 150);
@@ -953,6 +1098,7 @@ namespace ICTSMC
             _htfAggregators.Clear();
 
             var chartMinutes = EstimateChartMinutes(out var regular, out var approx, out var chartSeconds);
+            _chartMinutes = chartMinutes;
             var layers = new List<int>();
 
             if (HtfMode == HtfSelectionMode.Manual)
@@ -999,7 +1145,14 @@ namespace ICTSMC
         /// </summary>
         private DateTime GetBucketStart(DateTime time, int minutes)
         {
-            var anchorTicks = minutes >= 1440 ? TimeSpan.FromMinutes(DailyAnchorMinutes).Ticks : 0L;
+            // The anchor applies to EVERY layer, not just daily and above. Intraday HTF
+            // buckets were hard-anchored to midnight, so on a session-based instrument
+            // (futures opening 18:00) the synthetic 4H candles sat 2 hours out of phase
+            // with the platform's own H4 candles - different candles, therefore a
+            // completely different set of 4H gaps. Measured: a 2-hour phase shift changes
+            // 100% of the detected 4H FVG boundaries. Anchor 0 (default) = midnight,
+            // which is exactly the previous behaviour.
+            var anchorTicks = TimeSpan.FromMinutes(DailyAnchorMinutes).Ticks;
             var span = TimeSpan.FromMinutes(minutes).Ticks;
             var shifted = time.Ticks - anchorTicks;
 
@@ -1048,6 +1201,11 @@ namespace ICTSMC
             var candles = agg.Candles;
             var n = candles.Count;
 
+            // The order below mirrors OnBarComplete exactly - ATR, swings, structure
+            // break (and the order block it produces), then fair value gaps, then
+            // body-close settlement. Same rules, same sequence, different series.
+            UpdateHtfStructure(agg);
+
             if (HtfFvgEnabled && n >= 3)
             {
                 var a = candles[n - 3];
@@ -1090,63 +1248,164 @@ namespace ICTSMC
                 }
             }
 
-            if (HtfObEnabled && n >= 6)
-            {
-                var last = candles[n - 1];
-                var avgRange = candles.Skip(Math.Max(0, n - 11)).Take(10).Average(x => x.High - x.Low);
-
-                if (avgRange > 0 && last.High - last.Low >= avgRange * HtfDisplacementFactor &&
-                    HtfBrokeStructure(candles, n, out var bullish))
-                {
-                    for (var i = n - 2; i >= Math.Max(0, n - 6); i--)
-                    {
-                        var c = candles[i];
-                        var isOpposite = bullish ? c.Close < c.Open : c.Close > c.Open;
-                        if (!isOpposite)
-                            continue;
-
-                        AddZone(new Zone
-                        {
-                            Type = bullish ? ZoneType.BullOrderBlock : ZoneType.BearOrderBlock,
-                            IsHtf = true,
-                            HtfLabel = agg.Label,
-                            HtfMinutes = agg.Minutes,
-                            StartBar = c.FirstChartBar,
-                            Top = ObStyle == ObZoneStyle.Body ? Math.Max(c.Open, c.Close) : c.High,
-                            Bottom = ObStyle == ObZoneStyle.Body ? Math.Min(c.Open, c.Close) : c.Low
-                        });
-                        break;
-                    }
-                }
-            }
+            ApplyHtfBodyClose(agg);
         }
 
         /// <summary>
-        /// The HTF equivalent of the chart-TF "an OB only exists where structure broke"
-        /// rule: the displacement candle must CLOSE beyond the prior HtfStructureLookback
-        /// candles' extreme. Without it a wide-range HTF candle qualified on size alone —
-        /// and a wide-range candle is very often a reversal (an engulfing top, a news
-        /// spike), whose "last opposite candle" is not an institutional origin block at all.
+        /// Runs the REAL market-structure engine on one higher-timeframe series.
+        ///
+        /// This replaces a "displacement proxy" that asked whether the last candle's range
+        /// beat its 10-candle average and whether its close exceeded the highest high of
+        /// the previous few candles. That second test is a Donchian rolling-extreme
+        /// breakout, NOT a structure break: in any steady grind every new candle exceeds
+        /// the prior five, so it fired where no swing pivot existed at all and produced
+        /// order blocks a native chart of that timeframe would never draw.
+        ///
+        /// What runs here instead is exactly what the chart timeframe runs - Wilder ATR
+        /// seeded over a full period, fractal swing confirmation with SwingPeriod bars on
+        /// both sides, protected-swing tracking with counter-side re-anchoring, a close
+        /// beyond the protected swing, and CreateHtfOrderBlock's magnitude + imbalance
+        /// proofs - just against this layer's candles and this layer's own state.
         /// </summary>
-        private bool HtfBrokeStructure(List<HtfCandle> candles, int n, out bool bullish)
+        private void UpdateHtfStructure(HtfAggregator agg)
         {
-            var last = candles[n - 1];
-            bullish = last.Close > last.Open;
+            var c = agg.Candles;
+            var n = c.Count;
+            if (n < 2)
+                return;
 
-            var lookback = Math.Min(HtfStructureLookback, n - 1);
-            if (lookback < 2)
-                return false;
+            var st = agg.Structure;
+            var bar = n - 1;
 
-            var priorHigh = decimal.MinValue;
-            var priorLow = decimal.MaxValue;
+            // --- ATR of THIS series (identical formulation to UpdateAtr) ---
+            var tr = Math.Max(c[bar].High - c[bar].Low,
+                Math.Max(Math.Abs(c[bar].High - c[bar - 1].Close), Math.Abs(c[bar].Low - c[bar - 1].Close)));
 
-            for (var i = n - 1 - lookback; i <= n - 2; i++)
+            if (st.AtrSamples < AtrPeriod)
             {
-                if (candles[i].High > priorHigh) priorHigh = candles[i].High;
-                if (candles[i].Low < priorLow) priorLow = candles[i].Low;
+                st.AtrSeedSum += tr;
+                st.AtrSamples++;
+                st.Atr = st.AtrSeedSum / st.AtrSamples;
+            }
+            else
+            {
+                st.Atr += (tr - st.Atr) / AtrPeriod;
             }
 
-            return bullish ? last.Close > priorHigh : last.Close < priorLow;
+            // --- fractal swing confirmation (identical to ConfirmSwings) ---
+            var p = bar - SwingPeriod;
+            if (p >= SwingPeriod)
+            {
+                var pivot = c[p];
+                var isHigh = true;
+                var isLow = true;
+
+                for (var j = p - SwingPeriod; j <= p + SwingPeriod; j++)
+                {
+                    if (j == p)
+                        continue;
+
+                    if (c[j].High > pivot.High)
+                        isHigh = false;
+                    if (c[j].Low < pivot.Low)
+                        isLow = false;
+                    if (!isHigh && !isLow)
+                        break;
+                }
+
+                if (isHigh && (st.Highs.Count == 0 || st.Highs[^1].Bar != p))
+                {
+                    var swing = new SwingPoint { Bar = p, Price = pivot.High };
+                    st.Highs.Add(swing);
+                    if (!UseProtectedSwings || st.LastHigh == null || st.LastHigh.Broken ||
+                        swing.Price > st.LastHigh.Price)
+                        st.LastHigh = swing;
+                }
+
+                if (isLow && (st.Lows.Count == 0 || st.Lows[^1].Bar != p))
+                {
+                    var swing = new SwingPoint { Bar = p, Price = pivot.Low };
+                    st.Lows.Add(swing);
+                    if (!UseProtectedSwings || st.LastLow == null || st.LastLow.Broken ||
+                        swing.Price < st.LastLow.Price)
+                        st.LastLow = swing;
+                }
+            }
+
+            // --- structure break -> order block (identical to DetectStructureBreak) ---
+            var close = c[bar].Close;
+
+            if (st.LastHigh is { Broken: false } && close > st.LastHigh.Price)
+            {
+                st.LastHigh.Broken = true;
+                if (UseProtectedSwings)
+                {
+                    var low = st.Lows.LastOrDefault(l => !l.Broken);
+                    if (low != null)
+                        st.LastLow = low;
+                }
+
+                if (HtfObEnabled)
+                    CreateHtfOrderBlock(agg, bar, bullish: true);
+            }
+
+            if (st.LastLow is { Broken: false } && close < st.LastLow.Price)
+            {
+                st.LastLow.Broken = true;
+                if (UseProtectedSwings)
+                {
+                    var high = st.Highs.LastOrDefault(h => !h.Broken);
+                    if (high != null)
+                        st.LastHigh = high;
+                }
+
+                if (HtfObEnabled)
+                    CreateHtfOrderBlock(agg, bar, bullish: false);
+            }
+
+            if (st.Highs.Count > 300)
+                st.Highs.RemoveRange(0, st.Highs.Count - 300);
+            if (st.Lows.Count > 300)
+                st.Lows.RemoveRange(0, st.Lows.Count - 300);
+        }
+
+        /// <summary>
+        /// CreateOrderBlock for a higher-timeframe series: last opposite candle before the
+        /// break, magnitude against THIS layer's ATR, velocity proved by an imbalance in
+        /// the leg. Same three conditions, same lookback setting, same zone construction.
+        /// </summary>
+        private void CreateHtfOrderBlock(HtfAggregator agg, int breakBar, bool bullish)
+        {
+            var c = agg.Candles;
+            var st = agg.Structure;
+            var breakClose = c[breakBar].Close;
+
+            for (var i = breakBar - 1; i >= Math.Max(1, breakBar - ObLookback); i--)
+            {
+                var cand = c[i];
+                var isOpposite = bullish ? cand.Close < cand.Open : cand.Close > cand.Open;
+                if (!isOpposite)
+                    continue;
+
+                var impulse = bullish ? breakClose - cand.Low : cand.High - breakClose;
+                if (st.Atr > 0 && impulse < st.Atr * DisplacementAtrFactor)
+                    return;
+
+                if (RequireImbalanceForOb && !HtfLegHasImbalance(c, i, breakBar, bullish))
+                    return;
+
+                AddZone(new Zone
+                {
+                    Type = bullish ? ZoneType.BullOrderBlock : ZoneType.BearOrderBlock,
+                    IsHtf = true,
+                    HtfLabel = agg.Label,
+                    HtfMinutes = agg.Minutes,
+                    StartBar = cand.FirstChartBar,
+                    Top = ObStyle == ObZoneStyle.Body ? Math.Max(cand.Open, cand.Close) : cand.High,
+                    Bottom = ObStyle == ObZoneStyle.Body ? Math.Min(cand.Open, cand.Close) : cand.Low
+                });
+                return;
+            }
         }
 
         #endregion

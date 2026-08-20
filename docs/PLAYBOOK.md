@@ -309,12 +309,21 @@ remains available.
 
 ### 7.3 Aggregation correctness guarantees
 
-- HTF candles are built by truncating candle open-times from **absolute ticks** — a 4H
-  bucket always starts 00/04/08/12/16/20, daily at midnight, weekly Monday 00:00 (.NET
-  tick zero is a Monday). Zero drift by construction.
-- `DailyAnchorMinutes` shifts daily+ buckets to a futures session open (e.g. 1080 =
-  18:00 platform time) so "daily" zones match the exchange session, not calendar
-  midnight.
+- HTF candles are built by truncating candle open-times from **absolute ticks**, so a
+  layer never drifts. With the default anchor of 0 a 4H bucket starts 00/04/08/12/16/20,
+  daily at midnight, weekly Monday 00:00 (.NET tick zero is a Monday).
+- **The session anchor applies to EVERY layer, not just daily and above.** This matters
+  more than it sounds. Bucket *phase* is not a detail: measured on identical price data,
+  shifting the 4H buckets by two hours changed **100% of the detected 4H FVG
+  boundaries** — same prices, same rules, a completely different set of gaps. A
+  session-based instrument (futures opening 18:00) whose HTF layers are hard-anchored to
+  midnight therefore produces 4H zones that do not exist on the platform's own H4 chart.
+  Set `Session anchor` so the synthetic buckets line up with your platform's HTF candles.
+
+  **How to find your value:** open the HTF chart, read any candle's open time, convert to
+  minutes after midnight, and take it modulo the layer size. H4 candles opening at
+  01:00/05:00/09:00… → `60 mod 240` = **60**. Candles opening on the even 4-hour marks →
+  **0** (the default).
 - On configuration the aggregators are **retro-fed the entire loaded history**, making
   HTF zones *path-independent*: identical whether the chart was just opened or watched
   live all day.
@@ -322,7 +331,43 @@ remains available.
 - The **on-chart badge** (`HTF auto: 4H + D · chart 1H`) makes the selection verifiable
   at a glance after every timeframe switch.
 
-### 7.4 HTF detection
+### 7.4 Body-close semantics belong to the layer
+
+An HTF zone is judged on ITS OWN candle bodies. A 4H fair value gap is broken when a 4H
+candle body closes through it — not when some 15-minute candle does. Running the
+chart-timeframe body-close pass over HTF zones gave a 4H gap sixteen inversion
+opportunities per 4H candle on an M15 chart, and let a brief dip that a real 4H candle
+would have absorbed as a wick flip the zone permanently. Each layer now settles accounts
+with its own zones when its candle closes, before that candle is allowed to mint new ones.
+
+*Wick*-based mitigation (`FullFill`, `Midline`, `AnyTouch`) deliberately stays on chart
+bars: those are price-level tests, and "price traded through X" is timeframe-independent —
+detecting it immediately is the point of the intrabar engine. Only body-close semantics
+are timeframe-dependent.
+
+Mitigated HTF zones are also retained for at least four candles **of their own layer**
+rather than `KeepMitigatedBars` chart bars, or a filled 4H gap would be pruned before its
+own candle ever closed on it and could never invert.
+
+The "recently wick-mitigated" grace window for a flip is anchored to **real candle
+boundaries of the layer** (the same four-candle inclusive span the chart timeframe uses),
+not approximated as a bar count — approximating it drifted whenever a zone was wick-filled
+part-way through a candle and let gaps invert on candles a native chart would not count.
+
+**Verified by construction.** The same price series is run twice — once as an M15 chart
+with a 4H layer, once as a native 4H chart — and the resulting 4H zone sets are compared:
+
+| zone family | M15 with 4H layer | native 4H chart | identical boundaries |
+|---|---|---|---|
+| FVG | 16 | 16 | 16 of 16 |
+| iFVG | 3 | 3 | 3 of 3 |
+| OB | 3 | 3 | 3 of 3 |
+| Breaker | 0 | 0 | — |
+
+Exact parity across every family: a `4H OB` on an M15 chart is now the same object an H4
+chart would draw, at the same prices.
+
+### 7.5 HTF detection
 
 The *same* FVG rule runs on the synthetic HTF series, with its noise filter scaled to
 **that layer's own average range** — never the chart-TF ATR. Measuring a 4H gap against
@@ -330,9 +375,27 @@ The *same* FVG rule runs on the synthetic HTF series, with its noise filter scal
 FVG"; and because HTF zones drive the A+/A++ tier, that inflated the very tiering the
 analytics exist to compare.
 
-HTF order blocks need **both** displacement *and* a structure break, mirroring the
-chart-TF rule: the candle's range ≥ `HtfDisplacementFactor` × its 10-candle average
-**and** its close beyond the prior `HtfStructureLookback` candles' extreme. Size alone
+HTF order blocks run the **real structure engine on the HTF series**, not a proxy.
+
+They used to be detected by a shortcut: "last candle's range beats its 10-candle average"
+plus "its close exceeds the highest high of the previous few candles". That second test is
+a **Donchian rolling-extreme breakout, not a structure break** — in any steady grind every
+new candle exceeds the prior five, so it fired where no swing pivot existed at all and
+produced order blocks a native chart of that timeframe would never draw. On test data it
+generated twice as many as the real rule.
+
+Each layer now keeps its own market-structure state (`HtfStructure`) and runs exactly what
+the chart timeframe runs, against that layer's candles:
+
+1. Wilder ATR of the layer, seeded over a full period;
+2. fractal swing confirmation with `SwingPeriod` candles on both sides;
+3. protected-swing tracking with counter-side re-anchoring on every break;
+4. a **close beyond the protected swing** — a real BoS/MSS, not a rolling extreme;
+5. `CreateHtfOrderBlock`: last opposite candle within `ObLookback`, impulse ≥ ATR ×
+   `DisplacementAtrFactor`, and an imbalance left in the leg.
+
+`HtfDisplacementFactor` and `HtfStructureLookback` belonged to the proxy and are now
+unused; the settings remain so saved chart templates still load. Size alone
 qualified before — and a wide-range HTF candle is very often a *reversal* (an engulfing
 top, a news spike), whose "last opposite candle" is not an institutional origin block
 at all.
@@ -350,10 +413,22 @@ HTF zone is the reason for the trade; the LTF zone is the trigger.
 A three-stage state machine per direction, chaining the AMD cycle in order. Long side
 shown; shorts mirror.
 
-**Stage 1 — Manipulation: liquidity sweep.**
-Any tick below an SSL primes the long side (records the sweep bar). With
+**Stage 1 — Manipulation: liquidity sweep, and it must be a TRAP.**
+Any tick below an SSL primes the long side (records the sweep bar and the level). With
 `RequireSweepForEntry` on (default), no sweep = no long, period — an MSS without a prior
 stop-run is a much weaker reversal.
+
+`RequireTrapForEntry` (default on) adds the qualification that matters: the primed level
+must have closed **back inside** — a trap — not closed through. A sweep and a run are not
+interchangeable. Price poking through a level and closing back inside is the manipulation
+an ICT reversal is built on; price closing through it is a genuine breakout, and arming a
+reversal off that trades directly against the move that just proved itself. The engine
+always classified every finished sweep as trap or run, but for a long time that verdict
+only coloured the chart and never reached the entry model. It does now, and a rejection
+says so explicitly in the journal (`ArmRejected … was RUN through, not swept`).
+
+Sweep classification runs *before* structure detection on each candle, so a sweep and the
+MSS that follows it can land on the same candle and the verdict still exists in time.
 
 **Stage 2 — Confirmation: MSS.**
 A *bullish MSS* (close above the last swing high while trend was bearish) within
@@ -588,9 +663,16 @@ ever occurs it is stated in the file — `outcomes.csv` always stays complete.
 By default
 only LIVE rows are written (`Journal LIVE rows only`, on) — files stay lean and
 every row is a real-time event. Turning the toggle off makes the next
-recalculation regenerate the full HIST backfill: a deterministic backtest of the
-identical live code path, available on demand because replay always rebuilds it
-from the candles.
+recalculation regenerate the full HIST backfill.
+
+**Read the HIST rows with this caveat.** The backfill runs the identical code path, but
+not identical *inputs*. Replaying history, the intrabar engine sees each candle's finished
+high and low in one shot; live, it sees the tick sequence that produced them. Where an
+outcome depends on the ORDER of two prices inside one candle — a zone tapped and then
+filled, a stop and a target both touched — OHLC cannot recover that order, and replay and
+live can legitimately differ. Same-bar ambiguity resolves stop-first throughout, which is
+conservative but not clairvoyant. HIST rows are a faithful replay of the rules, not a
+tick-accurate simulation of fills; treat LIVE rows as the authoritative record.
 
 **Shadow trade management.** Alongside the raw fixed-stop outcome, every signal is
 also resolved under two virtual management styles — never traded, only logged — so
@@ -599,6 +681,14 @@ the journal accumulates a three-way comparison (`RMultiple` vs `BE1R_R` vs
 Both simulations run bar-by-bar on completed bars with the same conservative rule
 as the raw engine: if a bar touches both the (virtual) stop and a target, the stop
 counts first — including the very bar a trigger level is reached. Exact rules:
+
+**TP2 is a marker, not a resolution.** The raw model is one fixed-stop position running
+to TP3: it resolves at **SL**, **TP3**, or **Timeout** (close-based R), and nothing else.
+Booking a clean +2R because price merely tagged 2R and then drifted sideways to the
+timeout credited profit an unmanaged position never realised, and biased both AvgR and win
+rate upward. Taking money off at 2R is a *management* decision and is modelled exactly as
+that — see the Partial-at-+2R shadow below, which reports it in its own column. Win rate
+is therefore TP3 ÷ (TP3 + SL): deliberately the least flattering honest reading.
 
 - **BE-at-+1R** — the moment a bar's range reaches `entry + 1R` (mirrored for
   shorts), the virtual stop jumps to entry. From that bar on (inclusive): a return
@@ -668,6 +758,10 @@ quality — does touch #2 reject or break through? — is measurable from the da
   reviewed by hand, not enforced by the compiler.
 - The first HTF candle of loaded history can be partial if the history starts
   mid-bucket (true of any aggregator). Everything after is exact.
+- An HTF candle is only known to be closed once the first chart candle of the NEXT bucket
+  arrives, so HTF zones become available one chart bar after the HTF close. Unavoidable
+  without guessing at an unfinished candle, and preferable to a zone that repaints.
+- Historical outcomes cannot resolve intrabar sequencing — see the journal caveat above.
 - Synthetic HTF candles are built from loaded chart bars — load enough history for the
   Daily/Weekly layers to be meaningful.
 - The entry alert is a *setup detector with a plan*, not an auto-trader: the final

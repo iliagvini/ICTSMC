@@ -376,19 +376,19 @@ namespace ICTSMC
                 {
                     Resolve(s, bar, "TP3", s.Tp3, 3m);
                 }
-                else if (tp2Hit)
+                else
                 {
-                    s.Tp2Hit = true;
+                    // TP2 is a MARKER, never a resolution. The raw model is a single
+                    // fixed-stop position running to TP3; booking a clean +2R because
+                    // price merely tagged 2R and then drifted sideways to the timeout
+                    // credited profit that an unmanaged position never realised, and
+                    // biased AvgR and win rate upward. Taking money off at 2R IS
+                    // modelled — that is exactly what the Partial-at-+2R shadow does,
+                    // and it is reported in its own column.
+                    if (tp2Hit)
+                        s.Tp2Hit = true;
+
                     if (bar - s.SignalBar >= SignalTimeoutBars)
-                        Resolve(s, bar, "TP2", s.Tp2, 2m);
-                }
-                else if (bar - s.SignalBar >= SignalTimeoutBars)
-                {
-                    if (s.Tp2Hit)
-                    {
-                        Resolve(s, bar, "TP2", s.Tp2, 2m);
-                    }
-                    else
                     {
                         var r = s.Risk > 0
                             ? (s.Long ? candle.Close - s.Entry : s.Entry - candle.Close) / s.Risk
@@ -689,8 +689,12 @@ namespace ICTSMC
 
         /// <summary>
         /// Aggregated performance report.
-        /// Win rate = TP2+ resolutions ÷ (wins + SL losses); timeouts are excluded
-        /// from win rate but included in expectancy (AvgR).
+        ///
+        /// Win rate = TP3 resolutions ÷ (TP3 + SL); timeouts are excluded from win rate
+        /// but included in expectancy (AvgR) at their close-based R. The raw model is a
+        /// single fixed-stop position running to TP3 — deliberately the least flattering
+        /// reading. Management styles that bank profit earlier are reported separately in
+        /// AvgBE1R_R and AvgPartial2R_R, which is where a 2R exit belongs.
         /// </summary>
         private static string BuildAnalytics(IReadOnlyList<SignalRecord> pool, int trimmed)
         {
@@ -719,7 +723,7 @@ namespace ICTSMC
             foreach (var group in pool.GroupBy(selector).OrderBy(g => g.Key, StringComparer.Ordinal))
             {
                 var total = group.Count();
-                var wins = group.Count(s => s.Outcome is "TP2" or "TP3");
+                var wins = group.Count(s => s.Outcome == "TP3");
                 var losses = group.Count(s => s.Outcome == "SL");
                 var timeouts = group.Count(s => s.Outcome == "Timeout");
                 var decisive = wins + losses;
@@ -728,7 +732,6 @@ namespace ICTSMC
                 var avgR = group.Average(s => s.Outcome switch
                 {
                     "SL" => -1m,
-                    "TP2" => 2m,
                     "TP3" => 3m,
                     _ => s.Risk > 0 ? (s.Long ? s.Exit - s.Entry : s.Entry - s.Exit) / s.Risk : 0m
                 });
