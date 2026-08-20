@@ -462,12 +462,32 @@ namespace ICTSMC
             set => Set(ref _autoSecondLayer, value);
         }
 
-        [Display(GroupName = GrpHtf, Name = "Session anchor for ALL HTF layers (minutes after midnight)", Order = 714)]
+        [Display(GroupName = GrpHtf, Name = "Daily/Weekly anchor (minutes after midnight, 0 = calendar day)", Order = 714)]
         [Range(0, 1439)]
         public int DailyAnchorMinutes
         {
             get => _dailyAnchorMinutes;
             set => Set(ref _dailyAnchorMinutes, Math.Clamp(value, 0, 1439));
+        }
+
+        private int _intradayAnchorMinutes;
+
+        /// <summary>
+        /// Phase of the INTRADAY HTF buckets (15m / 1H / 4H). Separate from the daily anchor
+        /// on purpose: an instrument can have clock-aligned intraday bars and a session-based
+        /// DAILY candle at the same time. ATAS opens 4H candles at 00/04/08/12/16/20 and 1H
+        /// candles on the hour, regardless of the futures session — so a single shared anchor
+        /// could not serve both. Setting 18:00 to line up a session daily would drag the 4H
+        /// buckets to 18/22/02/06/10/14 and break alignment with the platform's own H4 chart.
+        ///
+        /// 0 (default) = clock-aligned, which is what ATAS does.
+        /// </summary>
+        [Display(GroupName = GrpHtf, Name = "Intraday HTF anchor (minutes after midnight, 0 = clock-aligned)", Order = 715)]
+        [Range(0, 1439)]
+        public int IntradayAnchorMinutes
+        {
+            get => _intradayAnchorMinutes;
+            set => Set(ref _intradayAnchorMinutes, Math.Clamp(value, 0, 1439));
         }
 
         private bool _htfFvgEnabled = true;

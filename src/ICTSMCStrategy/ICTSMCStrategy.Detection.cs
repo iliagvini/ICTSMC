@@ -1138,21 +1138,24 @@ namespace ICTSMC
         }
 
         /// <summary>
-        /// Bucket start for a candle open time. Buckets are anchored to midnight
-        /// (plus the configurable session anchor for daily-and-above layers, e.g.
-        /// 18:00 ET futures session opens). Weekly buckets align to Monday 00:00
-        /// because .NET tick zero (0001-01-01) is a Monday.
+        /// Bucket start for a candle open time.
+        ///
+        /// Bucket PHASE is not cosmetic: measured on identical price data, shifting the 4H
+        /// buckets by two hours changed 100% of the detected 4H FVG boundaries. The buckets
+        /// have to land where the platform's own HTF candles land.
+        ///
+        /// Intraday layers (15m/1H/4H) and daily-and-above layers get SEPARATE anchors,
+        /// because an instrument can have clock-aligned intraday bars and a session-based
+        /// daily at the same time - ATAS opens 4H candles at 00/04/08/12/16/20 regardless of
+        /// the futures session. A single shared anchor would force one to break the other.
+        ///
+        /// Both default to 0 = clock-aligned, matching ATAS. Weekly buckets align to Monday
+        /// 00:00 at anchor 0 because .NET tick zero (0001-01-01) is a Monday.
         /// </summary>
         private DateTime GetBucketStart(DateTime time, int minutes)
         {
-            // The anchor applies to EVERY layer, not just daily and above. Intraday HTF
-            // buckets were hard-anchored to midnight, so on a session-based instrument
-            // (futures opening 18:00) the synthetic 4H candles sat 2 hours out of phase
-            // with the platform's own H4 candles - different candles, therefore a
-            // completely different set of 4H gaps. Measured: a 2-hour phase shift changes
-            // 100% of the detected 4H FVG boundaries. Anchor 0 (default) = midnight,
-            // which is exactly the previous behaviour.
-            var anchorTicks = TimeSpan.FromMinutes(DailyAnchorMinutes).Ticks;
+            var anchorMinutes = minutes >= 1440 ? DailyAnchorMinutes : IntradayAnchorMinutes;
+            var anchorTicks = TimeSpan.FromMinutes(anchorMinutes).Ticks;
             var span = TimeSpan.FromMinutes(minutes).Ticks;
             var shifted = time.Ticks - anchorTicks;
 
