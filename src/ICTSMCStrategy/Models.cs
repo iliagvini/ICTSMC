@@ -68,6 +68,15 @@ namespace ICTSMC
         FullRange
     }
 
+    /// <summary>How the daily/weekly bucket boundary ("what is a trading day") is chosen.</summary>
+    public enum SessionAnchorMode
+    {
+        /// <summary>Measure the session boundary from the recurring daily gap in bar timestamps.</summary>
+        Auto,
+        /// <summary>Use the fixed DailyAnchorMinutes value.</summary>
+        Manual
+    }
+
     /// <summary>Where a liquidity pool came from.</summary>
     public enum LiquidityOrigin
     {

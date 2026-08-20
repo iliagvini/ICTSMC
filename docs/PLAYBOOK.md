@@ -329,10 +329,29 @@ remains available.
   the daily anchor to 1080 (18:00) moves only the D layer, leaving 1H and 4H untouched.
 
   Change `Intraday HTF anchor` only if your platform offsets intraday bars (read any HTF
-  candle's open time in minutes after midnight, modulo the layer size). Change
-  `Daily/Weekly anchor` if your daily candle follows an exchange session rather than the
-  calendar day — e.g. 1080 for an 18:00 futures open. That second one also governs
-  PDH/PDL/PWH/PWL.
+  candle's open time in minutes after midnight, modulo the layer size).
+
+- **The daily boundary detects itself** (`Daily/Weekly anchor mode` = Auto, default). It
+  finds where the trading day starts from the recurring gap in bar timestamps — the daily
+  maintenance break every futures contract has; the bar opening straight after that gap
+  opens the session.
+
+  This is measured rather than configured because **the right value is not constant**.
+  GC's session opens 17:00 Chicago, which on a UTC+2 chart is **00:00 in US summer and
+  01:00 in US winter**. An anchor set by hand in August is silently an hour wrong from
+  November onward, and takes every PDH/PDL/PWH/PWL with it. Only ~30 days of history are
+  scanned, so the window never straddles a daylight-saving change.
+
+  Detection is deliberately conservative: several gaps must agree, or it falls back to the
+  calendar day. A 24/7 instrument with no session break correctly yields 0. The result is
+  shown on the HTF badge (`day=01:00 (session gap, 28/31)`) and journaled as
+  `SessionAnchor`, so it is always verifiable rather than magic. Switch the mode to Manual
+  to pin it yourself. This anchor governs the D/W layers and PDH/PDL/PWH/PWL.
+
+  **Known limitation:** weekly buckets are anchored off the same value, which places the
+  week's start on Monday at the session time. A futures week actually opens Sunday evening,
+  so the W layer can be a day out on session-anchored instruments. The D layer and
+  PDH/PDL are unaffected.
 - On configuration the aggregators are **retro-fed the entire loaded history**, making
   HTF zones *path-independent*: identical whether the chart was just opened or watched
   live all day.

@@ -135,6 +135,13 @@ entries inside an HTF zone are the highest-quality setups.
   (4H opens 00/04/08/12/16/20, 1H on the hour). They are separate because an instrument
   can be clock-aligned intraday and session-based daily; one shared anchor could not serve
   both. Phase matters — a two-hour shift changes 100% of the detected 4H FVG boundaries.
+- The daily anchor is measured, not configured (`DailyAnchorMode` = Auto):
+  `Detection.cs → DetectSessionAnchorMinutes` finds the trading day's start from the
+  recurring daily gap in bar timestamps, over ~30 days so the window stays inside one
+  daylight-saving regime. A fixed value cannot be correct year-round — GC's 17:00 Chicago
+  open is 00:00 on a UTC+2 chart in summer and 01:00 in winter. Falls back to the calendar
+  day when the evidence is thin (e.g. a 24/7 instrument). Reported on the badge and
+  journaled as `SessionAnchor`.
 - HTF zones are mitigated/inverted on **their own layer's candle bodies**
   (`Detection.cs → ApplyHtfBodyClose`); wick-based rules stay intrabar on chart bars.
   Mitigated HTF zones are retained for four candles of their own layer so the layer's

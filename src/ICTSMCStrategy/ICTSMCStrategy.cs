@@ -61,6 +61,10 @@ namespace ICTSMC
         private string _chartTfLabel = "";
         /// <summary>Measured chart timeframe in minutes; scales HTF-relative windows.</summary>
         private int _chartMinutes;
+        /// <summary>Session start detected from bar-timestamp gaps; -1 = not resolved yet.</summary>
+        private int _dailyAnchorResolved = -1;
+        /// <summary>Human description of how the daily boundary was arrived at (badge/journal).</summary>
+        private string _dailyAnchorInfo = "";
 
         // Previous-session liquidity (PDH/PDL/PWH/PWL) bookkeeping.
         private DateTime _currentDayBucket = DateTime.MinValue;
@@ -462,7 +466,26 @@ namespace ICTSMC
             set => Set(ref _autoSecondLayer, value);
         }
 
-        [Display(GroupName = GrpHtf, Name = "Daily/Weekly anchor (minutes after midnight, 0 = calendar day)", Order = 714)]
+        private SessionAnchorMode _dailyAnchorMode = SessionAnchorMode.Auto;
+
+        /// <summary>
+        /// Auto (default) measures where the trading day actually starts from the recurring
+        /// daily gap in bar timestamps, and uses that for the D/W layers and PDH/PDL/PWH/PWL.
+        ///
+        /// This exists because a fixed minutes-after-midnight value cannot survive daylight
+        /// saving. GC's session opens 17:00 Chicago; on a UTC+2 chart that is 00:00 in US
+        /// summer and 01:00 in US winter. Anyone who set the anchor by hand in August would
+        /// silently have every "previous day" high/low an hour out from November onward.
+        /// Measuring it from the data re-derives it on every recalculation instead.
+        /// </summary>
+        [Display(GroupName = GrpHtf, Name = "Daily/Weekly anchor mode", Order = 713)]
+        public SessionAnchorMode DailyAnchorMode
+        {
+            get => _dailyAnchorMode;
+            set => Set(ref _dailyAnchorMode, value);
+        }
+
+        [Display(GroupName = GrpHtf, Name = "Daily/Weekly anchor (Manual mode; minutes after midnight)", Order = 714)]
         [Range(0, 1439)]
         public int DailyAnchorMinutes
         {
@@ -831,6 +854,8 @@ namespace ICTSMC
             _htfInfo = "";
             _chartTfLabel = "";
             _chartMinutes = 0;
+            _dailyAnchorResolved = -1;
+            _dailyAnchorInfo = "";
             _currentDayBucket = DateTime.MinValue;
             _currentWeekBucket = DateTime.MinValue;
             _dayHigh = _dayLow = _weekHigh = _weekLow = 0m;

@@ -1127,9 +1127,18 @@ namespace ICTSMC
                 ? measured
                 : $"~{approx:0.#}m/bar (irregular → {MinutesToLabel(chartMinutes)})";
 
+            var anchorNote = DailyAnchorMode == SessionAnchorMode.Manual
+                ? $"day={DailyAnchorMinutes / 60:00}:{DailyAnchorMinutes % 60:00} (manual)"
+                : (EffectiveDailyAnchorMinutes >= 0 && !string.IsNullOrEmpty(_dailyAnchorInfo)
+                    ? _dailyAnchorInfo
+                    : "day=calendar");
+
             _htfInfo = HtfMode == HtfSelectionMode.Manual
-                ? $"HTF manual: {layerText} · chart {chartText}"
-                : $"HTF auto: {layerText} · chart {chartText}";
+                ? $"HTF manual: {layerText} · chart {chartText} · {anchorNote}"
+                : $"HTF auto: {layerText} · chart {chartText} · {anchorNote}";
+
+            JournalEvent(_lastSeenBar, "SessionAnchor", "", null, 0m,
+                $"{anchorNote}; intraday anchor {IntradayAnchorMinutes}m; layers {layerText}");
 
             // The measured chart TF doubles as the alert identity ("GC 1H") and
             // registers this chart with the Telegram command hub (/shot).
@@ -1138,6 +1147,128 @@ namespace ICTSMC
         }
 
         /// <summary>
+        /// <summary>
+        /// The daily/weekly bucket anchor actually in force. In Auto mode this is measured
+        /// from the data once per recalculation and cached.
+        /// </summary>
+        private int EffectiveDailyAnchorMinutes
+        {
+            get
+            {
+                if (DailyAnchorMode == SessionAnchorMode.Manual)
+                    return DailyAnchorMinutes;
+
+                if (_dailyAnchorResolved < 0)
+                    _dailyAnchorResolved = DetectSessionAnchorMinutes();
+
+                return _dailyAnchorResolved;
+            }
+        }
+
+        /// <summary>
+        /// Finds where the trading day starts by looking for the recurring gap in bar
+        /// timestamps — the daily maintenance break every futures contract has (GC halts
+        /// 16:00–17:00 Chicago). The bar that opens immediately AFTER that gap opens the
+        /// session, and its time-of-day is the anchor.
+        ///
+        /// Why measure instead of configure: the right value is not constant. GC's session
+        /// opens 17:00 Chicago, which on a UTC+2 chart is 00:00 in US summer and 01:00 in US
+        /// winter. A hand-set anchor is silently an hour wrong for half the year, and every
+        /// PDH/PDL/PWH/PWL with it.
+        ///
+        /// Only RECENT history is scanned (about 30 days), because a longer window would
+        /// straddle a daylight-saving change and mix two different boundaries together.
+        ///
+        /// Deliberately conservative: it needs several gaps that agree, and returns 0 (the
+        /// calendar day, i.e. the previous behaviour) whenever the evidence is thin — a
+        /// 24/7 instrument with no session break correctly yields 0.
+        /// </summary>
+        private int DetectSessionAnchorMinutes()
+        {
+            var last = CurrentBar - 1;
+            if (last < 20)
+                return 0;
+
+            try
+            {
+                // Bar duration measured locally: this runs before the HTF layer has
+                // measured the chart timeframe.
+                var deltas = new List<double>();
+                var from = Math.Max(1, last - 2000);
+                for (var i = from; i <= last; i++)
+                {
+                    var d = (GetCandle(i).Time - GetCandle(i - 1).Time).TotalMinutes;
+                    if (d > 0)
+                        deltas.Add(d);
+                }
+
+                if (deltas.Count < 20)
+                    return 0;
+
+                deltas.Sort();
+                var barMinutes = deltas[deltas.Count / 2];
+                if (barMinutes <= 0)
+                    return 0;
+
+                // ~30 days of bars, so the window stays inside one daylight-saving regime.
+                var perDay = Math.Max(1, (int)(1440.0 / barMinutes));
+                var scanFrom = Math.Max(1, last - perDay * 30);
+                var threshold = barMinutes * 2.0;
+
+                var counts = new Dictionary<int, int>();
+                var total = 0;
+
+                for (var i = scanFrom; i <= last; i++)
+                {
+                    var open = GetCandle(i).Time;
+                    if ((open - GetCandle(i - 1).Time).TotalMinutes < threshold)
+                        continue;
+
+                    // Weekend and holiday gaps reinforce the same answer: the week reopens
+                    // at the session time too.
+                    var minuteOfDay = open.Hour * 60 + open.Minute;
+                    counts.TryGetValue(minuteOfDay, out var n);
+                    counts[minuteOfDay] = n + 1;
+                    total++;
+                }
+
+                if (total < 3)
+                {
+                    _dailyAnchorInfo = "day=calendar (no recurring session gap found)";
+                    return 0;
+                }
+
+                var bestMinute = 0;
+                var bestCount = 0;
+                foreach (var kv in counts)
+                {
+                    if (kv.Value > bestCount)
+                    {
+                        bestCount = kv.Value;
+                        bestMinute = kv.Key;
+                    }
+                }
+
+                // A real session boundary dominates its gaps; scattered gaps do not.
+                if (bestCount * 2 < total)
+                {
+                    _dailyAnchorInfo = $"day=calendar (session gaps inconsistent: best {bestCount}/{total})";
+                    return 0;
+                }
+
+                _dailyAnchorInfo = bestMinute == 0
+                    ? $"day=00:00 (session gap, {bestCount}/{total})"
+                    : $"day={bestMinute / 60:00}:{bestMinute % 60:00} (session gap, {bestCount}/{total})";
+                return bestMinute;
+            }
+            catch
+            {
+                // Series not fully available - fall back to the calendar day.
+                _dailyAnchorInfo = "day=calendar (bar scan unavailable)";
+                return 0;
+            }
+        }
+
         /// Bucket start for a candle open time.
         ///
         /// Bucket PHASE is not cosmetic: measured on identical price data, shifting the 4H
@@ -1154,7 +1285,7 @@ namespace ICTSMC
         /// </summary>
         private DateTime GetBucketStart(DateTime time, int minutes)
         {
-            var anchorMinutes = minutes >= 1440 ? DailyAnchorMinutes : IntradayAnchorMinutes;
+            var anchorMinutes = minutes >= 1440 ? EffectiveDailyAnchorMinutes : IntradayAnchorMinutes;
             var anchorTicks = TimeSpan.FromMinutes(anchorMinutes).Ticks;
             var span = TimeSpan.FromMinutes(minutes).Ticks;
             var shifted = time.Ticks - anchorTicks;
