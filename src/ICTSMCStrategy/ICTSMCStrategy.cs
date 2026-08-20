@@ -88,6 +88,11 @@ namespace ICTSMC
         // Entry-model state machine
         private int _pendingBullSweepBar = -1;  // sell-side liquidity was swept (long setup precursor)
         private int _pendingBearSweepBar = -1;  // buy-side liquidity was swept (short setup precursor)
+        // The level that primed each side. Kept so arming can ask whether that liquidity
+        // event was a TRAP (closed back inside) or a RUN (closed through) — an ICT
+        // reversal is seeded by the former, never the latter.
+        private LiquidityLevel _pendingBullSweepLevel;
+        private LiquidityLevel _pendingBearSweepLevel;
         private int _armedBullUntil = -1;
         private int _armedBearUntil = -1;
         private int _armedBullAtBar = -1;
@@ -526,6 +531,14 @@ namespace ICTSMC
             set => Set(ref _entryModelEnabled, value);
         }
 
+        private bool _requireTrapForEntry = true;
+        [Display(GroupName = GrpSignal, Name = "Sweep must be a TRAP, not a run", Order = 812)]
+        public bool RequireTrapForEntry
+        {
+            get => _requireTrapForEntry;
+            set => Set(ref _requireTrapForEntry, value);
+        }
+
         private bool _requireSweepForEntry = true;
         [Display(GroupName = GrpSignal, Name = "Require liquidity sweep first", Order = 810)]
         public bool RequireSweepForEntry
@@ -813,6 +826,8 @@ namespace ICTSMC
             _realtime = false;
             _pendingBullSweepBar = -1;
             _pendingBearSweepBar = -1;
+            _pendingBullSweepLevel = null;
+            _pendingBearSweepLevel = null;
             _armedBullUntil = -1;
             _armedBearUntil = -1;
             _armedBullAtBar = -1;

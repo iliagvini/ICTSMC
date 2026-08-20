@@ -25,6 +25,7 @@ namespace ICTSMC
                 return;
 
             UpdateAtr(bar);
+            ClassifyFinishedSweeps(bar);
             ConfirmSwings(bar);
             DetectStructureBreak(bar);
             UpdateLegExtreme(bar);
@@ -676,9 +677,6 @@ namespace ICTSMC
 
             CommitFlippedZones(flipped, bar, "");
 
-            // Classify finished sweeps: close back inside = trap, close through = run.
-            foreach (var level in _liquidity.Where(l => l.Swept && l.SweptBar == bar && l.WasTrap == null))
-                level.WasTrap = level.BuySide ? candle.Close < level.Price : candle.Close > level.Price;
         }
 
         /// <summary>
@@ -857,6 +855,28 @@ namespace ICTSMC
             Top = source.Top,
             Bottom = source.Bottom
         };
+
+        /// <summary>
+        /// Classifies sweeps that finished on this candle: closed back inside the level =
+        /// TRAP (the manipulation ICT trades), closed through = RUN (a real breakout).
+        ///
+        /// Runs BEFORE structure detection on purpose. The entry model consults this
+        /// classification when it decides whether a sweep may arm a reversal, and a sweep
+        /// and the MSS that follows it can land on the SAME candle - so the verdict has to
+        /// exist before DetectStructureBreak asks for it.
+        /// </summary>
+        private void ClassifyFinishedSweeps(int bar)
+        {
+            var close = GetCandle(bar).Close;
+
+            foreach (var level in _liquidity)
+            {
+                if (!level.Swept || level.SweptBar != bar || level.WasTrap != null)
+                    continue;
+
+                level.WasTrap = level.BuySide ? close < level.Price : close > level.Price;
+            }
+        }
 
         private void Mitigate(Zone zone, int bar)
         {

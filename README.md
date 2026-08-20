@@ -62,6 +62,9 @@ toggle:
   13:30-16:00`) to your chart's time, then switch it on. ICT practice is to use it.
 - **Trap-arm budget** — `MaxTrapChainHops` (default 1) caps how far an armed setup may
   sit from a real liquidity sweep, so "require a sweep" stays true in chop.
+- **Trap, not run** — `RequireTrapForEntry` (default on): a liquidity event only arms a
+  reversal if price closed back *inside* the level. A clean break that closes through is a
+  breakout, and a reversal armed off it trades against the move that just proved itself.
 
 ### Behaviour changes you should know about
 
@@ -82,6 +85,9 @@ If you have run an earlier build, these change what fires:
 - **Every detection setting triggers a clean recalculation** instead of leaving state
   built under the old rules.
 - **MAE/MFE now include the signal bar**, so historical stats are stricter (and honest).
+- **TP2 is no longer an outcome.** The raw model resolves SL / TP3 / Timeout only; a 2R
+  exit is a management style and is reported in the Partial-at-+2R shadow column. Headline
+  AvgR and win rate were previously biased upward by trades that merely tagged 2R.
 
 ### Expected build warning
 

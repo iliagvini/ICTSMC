@@ -81,9 +81,15 @@ namespace ICTSMC
                 // Entry-model precursor: taking sell-side liquidity primes LONGS,
                 // taking buy-side liquidity primes SHORTS.
                 if (level.BuySide)
+                {
                     _pendingBearSweepBar = bar;
+                    _pendingBearSweepLevel = level;
+                }
                 else
+                {
                     _pendingBullSweepBar = bar;
+                    _pendingBullSweepLevel = level;
+                }
 
                 JournalEvent(bar, "LiquiditySweep", level.BuySide ? "BuySide" : "SellSide", null, level.Price,
                     level.Label);
@@ -193,6 +199,27 @@ namespace ICTSMC
 
         #region Entry model (sweep → MSS → return to zone)
 
+        /// <summary>
+        /// True when the liquidity event that primed this side is usable as a REVERSAL
+        /// precursor. A sweep and a run are not interchangeable: price poking through a
+        /// level and closing back inside is the manipulation an ICT reversal is built on,
+        /// while price closing through it is a genuine breakout — arming a reversal off
+        /// the latter trades directly against the move that just proved itself.
+        ///
+        /// The engine already classified every finished sweep as trap or run; until now
+        /// that verdict only coloured the chart and never reached the entry model.
+        /// </summary>
+        private bool SweepQualifiesAsTrap(LiquidityLevel level)
+        {
+            if (!RequireTrapForEntry)
+                return true;
+
+            // null = not yet classified (the sweep candle has not closed). Classification
+            // runs before structure detection, so at arming time this is only null for a
+            // sweep on the still-forming candle.
+            return level != null && level.WasTrap == true;
+        }
+
         private void OnStructureEvent(StructureEvent evt)
         {
             JournalEvent(evt.Bar, evt.IsMss ? "MSS" : "BoS", evt.Bullish ? "Bull" : "Bear", null, evt.Level, "");
@@ -246,6 +273,7 @@ namespace ICTSMC
                     _armedBearSource = "";
                     _armedBearTrapDepth = 0;
                     _pendingBearSweepBar = -1;
+                    _pendingBearSweepLevel = null;
 
                     if (trappedShorts && AlertOnFailedMss)
                         Fire("⚠️ Failed bearish MSS\n" +
@@ -253,7 +281,9 @@ namespace ICTSMC
                              "👀 Failed shifts often fuel the opposite move — watch the new long side");
                 }
 
-                var hadSweep = _pendingBullSweepBar > 0 && evt.Bar - _pendingBullSweepBar <= SweepToMssWindow;
+                var sweepInWindow = _pendingBullSweepBar > 0 && evt.Bar - _pendingBullSweepBar <= SweepToMssWindow;
+                var sweepWasTrap = sweepInWindow && SweepQualifiesAsTrap(_pendingBullSweepLevel);
+                var hadSweep = sweepInWindow && sweepWasTrap;
                 var sweepOk = !RequireSweepForEntry || hadSweep;
 
                 var trapDepth = bearDepth + 1;
@@ -277,9 +307,11 @@ namespace ICTSMC
                 }
                 else
                 {
-                    var reason = _pendingBullSweepBar > 0
-                        ? $"sell-side sweep too old: SweepBar={_pendingBullSweepBar}, age={evt.Bar - _pendingBullSweepBar} > window {SweepToMssWindow}"
-                        : $"no sell-side sweep on record within {SweepToMssWindow} bars";
+                    var reason = !sweepInWindow
+                        ? (_pendingBullSweepBar > 0
+                            ? $"sell-side sweep too old: SweepBar={_pendingBullSweepBar}, age={evt.Bar - _pendingBullSweepBar} > window {SweepToMssWindow}"
+                            : $"no sell-side sweep on record within {SweepToMssWindow} bars")
+                        : $"sell-side liquidity was RUN through, not swept (closed beyond the level) — a breakout is not a reversal precursor; SweepBar={_pendingBullSweepBar}";
                     var trapNote = !ArmOnFailedMss ? "trap-arm off"
                         : !trappedShorts ? "no armed short to trap"
                         : $"trap budget spent: depth {trapDepth} > MaxTrapChainHops {MaxTrapChainHops}";
@@ -309,6 +341,7 @@ namespace ICTSMC
                     _armedBullSource = "";
                     _armedBullTrapDepth = 0;
                     _pendingBullSweepBar = -1;
+                    _pendingBullSweepLevel = null;
 
                     if (trappedLongs && AlertOnFailedMss)
                         Fire("⚠️ Failed bullish MSS\n" +
@@ -316,7 +349,9 @@ namespace ICTSMC
                              "👀 Failed shifts often fuel the opposite move — watch the new short side");
                 }
 
-                var hadSweep = _pendingBearSweepBar > 0 && evt.Bar - _pendingBearSweepBar <= SweepToMssWindow;
+                var sweepInWindow = _pendingBearSweepBar > 0 && evt.Bar - _pendingBearSweepBar <= SweepToMssWindow;
+                var sweepWasTrap = sweepInWindow && SweepQualifiesAsTrap(_pendingBearSweepLevel);
+                var hadSweep = sweepInWindow && sweepWasTrap;
                 var sweepOk = !RequireSweepForEntry || hadSweep;
 
                 var trapDepth = bullDepth + 1;
@@ -340,9 +375,11 @@ namespace ICTSMC
                 }
                 else
                 {
-                    var reason = _pendingBearSweepBar > 0
-                        ? $"buy-side sweep too old: SweepBar={_pendingBearSweepBar}, age={evt.Bar - _pendingBearSweepBar} > window {SweepToMssWindow}"
-                        : $"no buy-side sweep on record within {SweepToMssWindow} bars";
+                    var reason = !sweepInWindow
+                        ? (_pendingBearSweepBar > 0
+                            ? $"buy-side sweep too old: SweepBar={_pendingBearSweepBar}, age={evt.Bar - _pendingBearSweepBar} > window {SweepToMssWindow}"
+                            : $"no buy-side sweep on record within {SweepToMssWindow} bars")
+                        : $"buy-side liquidity was RUN through, not swept (closed beyond the level) — a breakout is not a reversal precursor; SweepBar={_pendingBearSweepBar}";
                     var trapNote = !ArmOnFailedMss ? "trap-arm off"
                         : !trappedLongs ? "no armed long to trap"
                         : $"trap budget spent: depth {trapDepth} > MaxTrapChainHops {MaxTrapChainHops}";
@@ -371,6 +408,7 @@ namespace ICTSMC
                 JournalEvent(bar, "SweepExpired", "SellSide", null, 0m,
                     $"SweepBar={_pendingBullSweepBar}; age={bar - _pendingBullSweepBar} > window {SweepToMssWindow}; no bullish MSS followed");
                 _pendingBullSweepBar = -1;
+                _pendingBullSweepLevel = null;
             }
 
             if (_pendingBearSweepBar > 0 && bar - _pendingBearSweepBar > SweepToMssWindow)
@@ -378,6 +416,7 @@ namespace ICTSMC
                 JournalEvent(bar, "SweepExpired", "BuySide", null, 0m,
                     $"SweepBar={_pendingBearSweepBar}; age={bar - _pendingBearSweepBar} > window {SweepToMssWindow}; no bearish MSS followed");
                 _pendingBearSweepBar = -1;
+                _pendingBearSweepLevel = null;
             }
 
             if (_armedBullUntil > 0 && bar > _armedBullUntil)
@@ -476,6 +515,7 @@ namespace ICTSMC
                         _armedBullUntil = -1;
                         _armedBullAtBar = -1;
                         _pendingBullSweepBar = -1;
+                        _pendingBullSweepLevel = null;
                         _armedBullSource = "";
                         _armedBullTrapDepth = 0;
                         EmitEntrySignal(matches, longSide: true, eq, tolerance, source, bar);
@@ -541,6 +581,7 @@ namespace ICTSMC
                         _armedBearUntil = -1;
                         _armedBearAtBar = -1;
                         _pendingBearSweepBar = -1;
+                        _pendingBearSweepLevel = null;
                         _armedBearSource = "";
                         _armedBearTrapDepth = 0;
                         EmitEntrySignal(matches, longSide: false, eq, tolerance, source, bar);

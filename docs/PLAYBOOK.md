@@ -413,10 +413,22 @@ HTF zone is the reason for the trade; the LTF zone is the trigger.
 A three-stage state machine per direction, chaining the AMD cycle in order. Long side
 shown; shorts mirror.
 
-**Stage 1 — Manipulation: liquidity sweep.**
-Any tick below an SSL primes the long side (records the sweep bar). With
+**Stage 1 — Manipulation: liquidity sweep, and it must be a TRAP.**
+Any tick below an SSL primes the long side (records the sweep bar and the level). With
 `RequireSweepForEntry` on (default), no sweep = no long, period — an MSS without a prior
 stop-run is a much weaker reversal.
+
+`RequireTrapForEntry` (default on) adds the qualification that matters: the primed level
+must have closed **back inside** — a trap — not closed through. A sweep and a run are not
+interchangeable. Price poking through a level and closing back inside is the manipulation
+an ICT reversal is built on; price closing through it is a genuine breakout, and arming a
+reversal off that trades directly against the move that just proved itself. The engine
+always classified every finished sweep as trap or run, but for a long time that verdict
+only coloured the chart and never reached the entry model. It does now, and a rejection
+says so explicitly in the journal (`ArmRejected … was RUN through, not swept`).
+
+Sweep classification runs *before* structure detection on each candle, so a sweep and the
+MSS that follows it can land on the same candle and the verdict still exists in time.
 
 **Stage 2 — Confirmation: MSS.**
 A *bullish MSS* (close above the last swing high while trend was bearish) within
@@ -651,9 +663,16 @@ ever occurs it is stated in the file — `outcomes.csv` always stays complete.
 By default
 only LIVE rows are written (`Journal LIVE rows only`, on) — files stay lean and
 every row is a real-time event. Turning the toggle off makes the next
-recalculation regenerate the full HIST backfill: a deterministic backtest of the
-identical live code path, available on demand because replay always rebuilds it
-from the candles.
+recalculation regenerate the full HIST backfill.
+
+**Read the HIST rows with this caveat.** The backfill runs the identical code path, but
+not identical *inputs*. Replaying history, the intrabar engine sees each candle's finished
+high and low in one shot; live, it sees the tick sequence that produced them. Where an
+outcome depends on the ORDER of two prices inside one candle — a zone tapped and then
+filled, a stop and a target both touched — OHLC cannot recover that order, and replay and
+live can legitimately differ. Same-bar ambiguity resolves stop-first throughout, which is
+conservative but not clairvoyant. HIST rows are a faithful replay of the rules, not a
+tick-accurate simulation of fills; treat LIVE rows as the authoritative record.
 
 **Shadow trade management.** Alongside the raw fixed-stop outcome, every signal is
 also resolved under two virtual management styles — never traded, only logged — so
@@ -662,6 +681,14 @@ the journal accumulates a three-way comparison (`RMultiple` vs `BE1R_R` vs
 Both simulations run bar-by-bar on completed bars with the same conservative rule
 as the raw engine: if a bar touches both the (virtual) stop and a target, the stop
 counts first — including the very bar a trigger level is reached. Exact rules:
+
+**TP2 is a marker, not a resolution.** The raw model is one fixed-stop position running
+to TP3: it resolves at **SL**, **TP3**, or **Timeout** (close-based R), and nothing else.
+Booking a clean +2R because price merely tagged 2R and then drifted sideways to the
+timeout credited profit an unmanaged position never realised, and biased both AvgR and win
+rate upward. Taking money off at 2R is a *management* decision and is modelled exactly as
+that — see the Partial-at-+2R shadow below, which reports it in its own column. Win rate
+is therefore TP3 ÷ (TP3 + SL): deliberately the least flattering honest reading.
 
 - **BE-at-+1R** — the moment a bar's range reaches `entry + 1R` (mirrored for
   shorts), the virtual stop jumps to entry. From that bar on (inclusive): a return
@@ -731,6 +758,10 @@ quality — does touch #2 reject or break through? — is measurable from the da
   reviewed by hand, not enforced by the compiler.
 - The first HTF candle of loaded history can be partial if the history starts
   mid-bucket (true of any aggregator). Everything after is exact.
+- An HTF candle is only known to be closed once the first chart candle of the NEXT bucket
+  arrives, so HTF zones become available one chart bar after the HTF close. Unavoidable
+  without guessing at an unfinished candle, and preferable to a zone that repaints.
+- Historical outcomes cannot resolve intrabar sequencing — see the journal caveat above.
 - Synthetic HTF candles are built from loaded chart bars — load enough history for the
   Daily/Weekly layers to be meaningful.
 - The entry alert is a *setup detector with a plan*, not an auto-trader: the final
