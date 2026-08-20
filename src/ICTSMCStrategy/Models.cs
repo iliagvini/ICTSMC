@@ -280,12 +280,31 @@ namespace ICTSMC
     /// One higher-timeframe layer: aggregates chart candles into fixed time buckets
     /// and keeps the resulting synthetic series.
     /// </summary>
+    /// <summary>
+    /// Per-layer market-structure state: the SAME bookkeeping the chart timeframe keeps,
+    /// held separately for each synthetic HTF series so the identical swing/BoS/order-block
+    /// rules can run on it.
+    /// </summary>
+    internal sealed class HtfStructure
+    {
+        public readonly System.Collections.Generic.List<SwingPoint> Highs = new();
+        public readonly System.Collections.Generic.List<SwingPoint> Lows = new();
+        public SwingPoint LastHigh;
+        public SwingPoint LastLow;
+
+        // Wilder ATR of this series, seeded from a full-period simple average.
+        public decimal Atr;
+        public int AtrSamples;
+        public decimal AtrSeedSum;
+    }
+
     internal sealed class HtfAggregator
     {
         public int Minutes;
         public string Label;
         public readonly System.Collections.Generic.List<HtfCandle> Candles = new();
         public HtfCandle Current;
+        public readonly HtfStructure Structure = new();
 
         /// <summary>Mean high-low range of the recent closed HTF candles — the scale
         /// reference for this layer's own noise filters (never the chart-TF ATR).</summary>

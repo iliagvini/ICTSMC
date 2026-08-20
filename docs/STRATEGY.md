@@ -111,11 +111,13 @@ entries inside an HTF zone are the highest-quality setups.
   (`HtfAggregator.AverageRange`), never the chart-TF ATR. Measuring a 4H gap against
   0.15 × a 5m ATR was no filter at all, and because HTF zones drive the A+/A++ tier,
   that inflated the very tiering the analytics exist to compare.
-- **HTF order blocks require a structure break too** (`Detection.cs → HtfBrokeStructure`):
-  the displacement candle must close beyond the prior `HtfStructureLookback` candles'
-  extreme. Size alone qualified before — and a wide-range candle is very often a
-  *reversal* (an engulfing top, a news spike), whose “last opposite candle” is not an
-  institutional origin block at all.
+- **HTF order blocks run the real structure engine** (`Detection.cs → UpdateHtfStructure`,
+  `CreateHtfOrderBlock`), not a proxy. Each layer keeps its own ATR, fractal swings and
+  protected-swing state, and an OB requires a close beyond the protected swing plus the
+  same magnitude and imbalance proofs the chart timeframe demands. The previous shortcut
+  used a Donchian rolling-extreme breakout as its "structure break", which fires where no
+  swing exists. Verified: an M15 chart with a 4H layer now reproduces a native 4H chart's
+  FVGs, iFVGs and OBs with identical counts and identical boundaries.
 
 ### Auto HTF selection
 

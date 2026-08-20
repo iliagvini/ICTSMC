@@ -349,9 +349,23 @@ Mitigated HTF zones are also retained for at least four candles **of their own l
 rather than `KeepMitigatedBars` chart bars, or a filled 4H gap would be pruned before its
 own candle ever closed on it and could never invert.
 
-**Verified:** on identical price data, an M15 chart with a 4H layer now reproduces a native
-4H chart's fair value gaps exactly — 16 of 16 with identical boundaries — and every iFVG
-the native chart produces, with identical boundaries.
+The "recently wick-mitigated" grace window for a flip is anchored to **real candle
+boundaries of the layer** (the same four-candle inclusive span the chart timeframe uses),
+not approximated as a bar count — approximating it drifted whenever a zone was wick-filled
+part-way through a candle and let gaps invert on candles a native chart would not count.
+
+**Verified by construction.** The same price series is run twice — once as an M15 chart
+with a 4H layer, once as a native 4H chart — and the resulting 4H zone sets are compared:
+
+| zone family | M15 with 4H layer | native 4H chart | identical boundaries |
+|---|---|---|---|
+| FVG | 16 | 16 | 16 of 16 |
+| iFVG | 3 | 3 | 3 of 3 |
+| OB | 3 | 3 | 3 of 3 |
+| Breaker | 0 | 0 | — |
+
+Exact parity across every family: a `4H OB` on an M15 chart is now the same object an H4
+chart would draw, at the same prices.
 
 ### 7.5 HTF detection
 
@@ -361,17 +375,27 @@ The *same* FVG rule runs on the synthetic HTF series, with its noise filter scal
 FVG"; and because HTF zones drive the A+/A++ tier, that inflated the very tiering the
 analytics exist to compare.
 
-HTF order blocks need displacement, a structure break, **and** an imbalance in the leg —
-the same three-part proof the chart-TF rule demands: the candle's range ≥
-`HtfDisplacementFactor` × its 10-candle average, its close beyond the prior
-`HtfStructureLookback` candles' extreme, and a 3-candle gap left behind in the leg.
+HTF order blocks run the **real structure engine on the HTF series**, not a proxy.
 
-**Known divergence:** even so, HTF order blocks are detected by a *displacement proxy*,
-while chart-TF order blocks come from the full swing/BoS structure engine, which is not
-run on the synthetic HTF series. So a `4H OB` drawn on an M15 chart is not guaranteed to
-be an `OB` a native H4 chart would draw — on test data the proxy produced roughly twice as
-many. Fair value gaps, which are purely geometric, match exactly; order blocks are the
-one family where the two paths can legitimately disagree. Size alone
+They used to be detected by a shortcut: "last candle's range beats its 10-candle average"
+plus "its close exceeds the highest high of the previous few candles". That second test is
+a **Donchian rolling-extreme breakout, not a structure break** — in any steady grind every
+new candle exceeds the prior five, so it fired where no swing pivot existed at all and
+produced order blocks a native chart of that timeframe would never draw. On test data it
+generated twice as many as the real rule.
+
+Each layer now keeps its own market-structure state (`HtfStructure`) and runs exactly what
+the chart timeframe runs, against that layer's candles:
+
+1. Wilder ATR of the layer, seeded over a full period;
+2. fractal swing confirmation with `SwingPeriod` candles on both sides;
+3. protected-swing tracking with counter-side re-anchoring on every break;
+4. a **close beyond the protected swing** — a real BoS/MSS, not a rolling extreme;
+5. `CreateHtfOrderBlock`: last opposite candle within `ObLookback`, impulse ≥ ATR ×
+   `DisplacementAtrFactor`, and an imbalance left in the leg.
+
+`HtfDisplacementFactor` and `HtfStructureLookback` belonged to the proxy and are now
+unused; the settings remain so saved chart templates still load. Size alone
 qualified before — and a wide-range HTF candle is very often a *reversal* (an engulfing
 top, a news spike), whose "last opposite candle" is not an institutional origin block
 at all.

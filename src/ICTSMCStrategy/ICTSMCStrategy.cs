@@ -482,7 +482,7 @@ namespace ICTSMC
         }
 
         private decimal _htfDisplacementFactor = 1.3m;
-        [Display(GroupName = GrpHtf, Name = "HTF displacement (avg range ×)", Order = 740)]
+        [Display(GroupName = GrpHtf, Name = "HTF displacement (legacy — unused; OBs now use the ATR × filter)", Order = 740)]
         [Range(0, 10)]
         public decimal HtfDisplacementFactor
         {
@@ -491,7 +491,7 @@ namespace ICTSMC
         }
 
         private int _htfStructureLookback = 5;
-        [Display(GroupName = GrpHtf, Name = "HTF structure lookback (candles)", Order = 742)]
+        [Display(GroupName = GrpHtf, Name = "HTF structure lookback (legacy — unused; swing structure is used)", Order = 742)]
         [Range(2, 30)]
         public int HtfStructureLookback
         {
