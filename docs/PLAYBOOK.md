@@ -296,13 +296,28 @@ higher timeframes") without giving mechanics. The implemented mechanics:
 
 ### 7.2 The institutional ladder
 
-| Chart TF (measured) | Primary HTF | Second layer (`AutoSecondLayer`, default on) |
-|---|---|---|
-| ≤ 1m | 15m | 1H |
-| 2–5m | 1H | 4H |
-| 15m–1H | 4H | Daily |
-| 2H–4H | Daily | Weekly |
-| Daily+ | Weekly | — |
+| Chart TF (measured) | Primary HTF | Context layers (`AutoSecondLayer`, default on) | A++ |
+|---|---|---|---|
+| ≤ 1m | 15m | 1H + 4H | no |
+| 2–5m | 1H | 4H + **Daily** | yes |
+| 6m–1H | 4H | Daily | yes |
+| 2H–4H | Daily | Weekly | yes |
+| Daily+ | Weekly | — | yes |
+
+The ladder climbs to a **third** rung only when the first two fail to reach a
+Daily-or-higher layer. That threshold is not arbitrary: the A++ confluence tier is defined
+as "a zone from a layer of 1440 minutes or more", so a two-rung 5m chart (1H + 4H) had the
+top tier *permanently unreachable* rather than merely rare, and carried no Daily context at
+all while a 15m chart beside it did.
+
+It is deliberately conditional rather than "always three". A 15m chart already reaches Daily
+on its second rung; giving it a third would append Weekly, changing a configuration that is
+correct today and demanding roughly 27,000 chart bars to feed the new layer. Charts that
+already reach Daily are left exactly as they were — verified per timeframe in the test suite.
+
+A 1m chart still cannot reach Daily inside the three-layer cap (it would need four rungs,
+and a Daily candle is 1,440 one-minute bars), so A++ remains out of reach there. That is
+stated rather than papered over.
 
 The chosen HTF is *guaranteed* strictly above the chart TF. Manual mode (fixed minutes)
 remains available.

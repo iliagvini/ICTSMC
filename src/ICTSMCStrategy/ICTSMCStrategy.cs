@@ -255,13 +255,30 @@ namespace ICTSMC
         [Display(GroupName = GrpGeneral, Name = "Display mode", Order = 90)]
         public DisplayMode DisplayMode { get; set; } = DisplayMode.Clean;
 
+        /// <summary>
+        /// Nearest N zones drawn per side, in Clean mode — counted SEPARATELY for chart-TF and
+        /// HTF zones, but shared across every HTF layer. Six rather than four because the HTF
+        /// budget now has up to three layers competing for it: at four, a sub-5m chart could
+        /// spend every slot on nearby 1H zones and never draw the Daily frame that justifies
+        /// the layer existing.
+        /// </summary>
         [Display(GroupName = GrpGeneral, Name = "Visible zones per side (Clean mode)", Order = 92)]
         [Range(1, 20)]
-        public int MaxVisibleZonesPerSide { get; set; } = 4;
+        public int MaxVisibleZonesPerSide { get; set; } = 6;
 
+        /// <summary>
+        /// Distance budget for drawing a zone, as a multiple of ATR (HTF zones get double).
+        /// Zero disables distance culling entirely, which is the shipped default.
+        ///
+        /// This does NOT flood the chart: MaxVisibleZonesPerSide still caps what is drawn, so
+        /// the effect is "always show the nearest N per side" instead of "show the nearest N,
+        /// but only if they happen to be close". The previous default of 8 silently hid Daily
+        /// zones on a 15m chart whenever price was more than 16 ATR away from them — which is
+        /// most of the time, and precisely when a Daily level is worth having on screen.
+        /// </summary>
         [Display(GroupName = GrpGeneral, Name = "Zone visibility range (ATR ×, 0 = all)", Order = 94)]
         [Range(0, 100)]
-        public int ZoneVisibilityAtrRange { get; set; } = 8;
+        public int ZoneVisibilityAtrRange { get; set; } = 0;
 
         private int _swingPeriod = 3;
         [Display(GroupName = GrpGeneral, Name = "Swing period (fractal strength)", Order = 100)]
@@ -584,7 +601,9 @@ namespace ICTSMC
             set => Set(ref _htfManualMinutes, Math.Clamp(value, 1, 20160));
         }
 
-        [Display(GroupName = GrpHtf, Name = "Auto: add second HTF layer", Order = 712)]
+        // Property name kept as-is so charts saved against an earlier build still bind it;
+        // only the label changed, because on a sub-5m chart this now gates two extra layers.
+        [Display(GroupName = GrpHtf, Name = "Auto: add higher context layers", Order = 712)]
         public bool AutoSecondLayer
         {
             get => _autoSecondLayer;

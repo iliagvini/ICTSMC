@@ -17,7 +17,7 @@ candle to close.
 | **BoS / MSS** (Ch. 6) | Fractal swings → close-through breaks of the **protected** swing (internal pullback highs/lows no longer count); continuation = BoS (dashed, light), reversal = MSS/CHoCH (solid, heavier) |
 | **Entry model** (Ch. 7) | State machine: *liquidity sweep → MSS → price returns to aligned FVG/OB in the correct half of the range* → entry alert with SL + 2R/3R targets |
 | **Premium / Discount, Power of 3** (Ch. 8) | Equilibrium (50%) of the current dealing range, subtle premium/discount shading; entry model only buys in discount / sells in premium |
-| **Higher-timeframe framework** | **Auto mode (default):** the indicator *measures* the chart timeframe from the data itself and picks the institutional ladder (1m→15m+1H, 5m→1H+4H, 15m–1H→4H+D, 4H→D+W); HTF FVGs and OBs are mapped onto your chart with stronger styling. An on-chart badge shows exactly what was detected/chosen. Manual mode with fixed minutes is still available |
+| **Higher-timeframe framework** | **Auto mode (default):** the indicator *measures* the chart timeframe from the data itself and picks the institutional ladder (1m→15m+1H+4H, 2–5m→1H+4H+**D**, 6m–1H→4H+D, 2H–4H→D+W, >4H→W); HTF FVGs and OBs are mapped onto your chart with stronger styling. A third rung is added only where the first two would not reach a Daily layer, so the A++ tier is reachable on sub-5m charts too. An on-chart badge shows exactly what was detected/chosen. Manual mode with fixed minutes is still available |
 
 ## Alerts
 
@@ -265,6 +265,26 @@ the ATAS Indicators folder (see the note above — normally
 > installation. ATAS occasionally moves types between versions — if the compiler
 > complains about a member (e.g. an `AddAlert` overload), adjust to the signature your
 > ATAS version exposes; the code keeps the API surface deliberately small.
+
+## Chart history depth — the one thing the indicator cannot do for you
+
+Everything else self-configures from the data. This cannot: HTF candles are aggregated from
+the chart bars **ATAS has loaded**, so a chart set to a short history silently produces a
+thin top layer that still feeds the confluence tier and the bias filter. It does not warn,
+because from the engine's point of view the data simply isn't there.
+
+A layer needs roughly 40 of its own candles before its ATR is seeded, its fractal swings
+confirm and its noise floor means anything. The Daily layer is the binding constraint on
+both intraday setups:
+
+| Chart | Layers | Bars per Daily candle | Minimum bars | Set history to |
+|---|---|---|---|---|
+| 5m | 1H + 4H + D | 288 | ~11,500 | **60 days** |
+| 15m | 4H + D | 96 | ~3,850 | **60 days** |
+
+Both land on the same ~42 trading sessions because the Daily layer sets the requirement in
+each case — only the bar count differs. Set it once per chart in ATAS's own history settings;
+60 calendar days gives headroom over the ~42-session floor.
 
 ## Key settings
 

@@ -154,9 +154,17 @@ entries inside an HTF zone are the highest-quality setups.
   If no delta dominates (tick/volume/range/renko charts), the **median** bar duration is
   rounded up to the next standard TF as a conservative basis. Sub-minute charts keep
   their real label (`30s`) instead of collapsing to `1m`.
-- Ladder: `≤1m → 15m (+1H)`, `≤5m → 1H (+4H)`, `6m–1H → 4H (+D)`, `2H–4H → D (+W)`,
-  `>4H → W`. The chosen HTF is guaranteed to sit strictly above the chart TF; a second
-  layer is optional (`AutoSecondLayer`).
+- Ladder (`Detection.cs → AutoLadder`): `≤1m → 15m + 1H + 4H`, `≤5m → 1H + 4H + D`,
+  `6m–1H → 4H + D`, `2H–4H → D + W`, `>4H → W`. Every layer is guaranteed to sit strictly
+  above the chart TF, and the extra context layers are optional (`AutoSecondLayer`, on).
+- A **third** rung is added only when the first two fail to reach a Daily-or-higher layer.
+  The A++ tier is defined as "a zone from a layer ≥ 1440 minutes", so a two-rung 5m chart
+  (1H + 4H) had the top tier permanently unreachable and no Daily context at all, while a
+  15m chart beside it had both. Charts that already reach Daily on their second rung —
+  15m, 30m, 1H, 4H — are deliberately left untouched, because appending a further rung
+  there would mean Weekly and roughly 27,000 chart bars to feed it. `MaxAutoLayers` caps
+  the climb at three, so a 1m chart still cannot reach Daily; that is a stated limit, not
+  an oversight.
 - The chart timeframe is measured by `Detection.cs → UpdateChartTimeframe`, which runs on
   every bar close **regardless of whether HTF mapping is enabled** — it is a property of the
   chart, not of the feature. Deriving it inside `ConfigureHtfLayers` meant that turning HTF
