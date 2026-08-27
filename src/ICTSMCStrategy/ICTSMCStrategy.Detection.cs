@@ -1280,28 +1280,72 @@ namespace ICTSMC
             return 1440;
         }
 
-        /// <summary>Chart minutes → (primary, secondary) HTF from the institutional ladder.</summary>
-        private static (int Primary, int Secondary) AutoLadder(int chartMinutes)
+        /// <summary>A layer of this size or larger makes the A++ confluence tier reachable.</summary>
+        private const int DailyMinutes = 1440;
+
+        /// <summary>
+        /// Ceiling on how many layers Auto mode will build. Each layer is a full synthetic
+        /// series with its own ATR, swings, structure and zone caps, and each one multiplies
+        /// the chart history the chart must hold — so the climb below is bounded rather than
+        /// allowed to run to the top of the ladder.
+        /// </summary>
+        private const int MaxAutoLayers = 3;
+
+        /// <summary>
+        /// Chart minutes → the HTF layers to build, lowest first.
+        ///
+        /// The first two rungs are the long-standing behaviour: the next rung strictly above
+        /// the chart timeframe, plus the one after it.
+        ///
+        /// A THIRD rung is added only when those two fail to reach a Daily-or-higher layer.
+        /// That condition is what makes the A++ tier reachable at all — the tier test asks for
+        /// a zone from a layer of <see cref="DailyMinutes"/> or more — so without it a 5m chart
+        /// (1H + 4H) had A++ permanently out of reach, not merely rare, and carried no Daily
+        /// context at all while a 15m chart beside it did.
+        ///
+        /// Deliberately conditional rather than "always three": a 15m chart already reaches
+        /// Daily on its second rung, and giving it a third would append Weekly — changing a
+        /// configuration that is correct today and demanding roughly 27,000 chart bars to feed
+        /// the new layer. Charts that already reach Daily are left exactly as they were.
+        /// </summary>
+        private static List<int> AutoLadder(int chartMinutes)
         {
-            var primary = chartMinutes switch
+            var start = chartMinutes switch
             {
-                <= 1 => 15,     // 1m  → 15m (+1H)
-                <= 5 => 60,     // 2-5m → 1H (+4H)
-                <= 60 => 240,   // 6m-1H → 4H (+D)
-                <= 240 => 1440, // 2H-4H → D (+W)
-                _ => 10080      // D+ → W
+                <= 1 => 15,     // 1m   → 15m
+                <= 5 => 60,     // 2-5m → 1H
+                <= 60 => 240,   // 6m-1H → 4H
+                <= 240 => 1440, // 2H-4H → D
+                _ => 10080      // D+   → W
             };
 
+            var layers = new List<int>();
+
+            var idx = Array.IndexOf(HtfRungs, start);
+            if (idx < 0)
+                return layers;
+
             // Guarantee the HTF sits strictly above the chart timeframe.
-            var idx = Array.IndexOf(HtfRungs, primary);
-            while (primary <= chartMinutes && idx < HtfRungs.Length - 1)
-                primary = HtfRungs[++idx];
+            while (idx < HtfRungs.Length - 1 && HtfRungs[idx] <= chartMinutes)
+                idx++;
 
-            if (primary <= chartMinutes)
-                return (0, 0);
+            if (HtfRungs[idx] <= chartMinutes)
+                return layers;
 
-            var secondary = idx < HtfRungs.Length - 1 ? HtfRungs[idx + 1] : 0;
-            return (primary, secondary);
+            layers.Add(HtfRungs[idx]);
+
+            if (idx + 1 < HtfRungs.Length)
+                layers.Add(HtfRungs[idx + 1]);
+
+            // Climb only while no Daily-or-higher layer has been reached.
+            var next = idx + 2;
+            while (next < HtfRungs.Length && layers.Count < MaxAutoLayers && layers[^1] < DailyMinutes)
+            {
+                layers.Add(HtfRungs[next]);
+                next++;
+            }
+
+            return layers;
         }
 
         private static string MinutesToLabel(int minutes) => minutes switch
@@ -1334,11 +1378,20 @@ namespace ICTSMC
             }
             else
             {
-                var (primary, secondary) = AutoLadder(chartMinutes);
-                if (primary > 0)
-                    layers.Add(primary);
-                if (AutoSecondLayer && secondary > 0)
-                    layers.Add(secondary);
+                // The primary layer is always built; AutoSecondLayer gates every ADDITIONAL
+                // context layer, which on a sub-5m chart is now two rather than one.
+                var ladder = AutoLadder(chartMinutes);
+
+                if (ladder.Count > 0)
+                {
+                    layers.Add(ladder[0]);
+
+                    if (AutoSecondLayer)
+                    {
+                        for (var i = 1; i < ladder.Count; i++)
+                            layers.Add(ladder[i]);
+                    }
+                }
             }
 
             foreach (var minutes in layers)
