@@ -68,7 +68,32 @@ toggle:
 
 ### Behaviour changes you should know about
 
-**From the code audit (this build):**
+**From the chart review (this build):**
+
+- **The order-block imbalance proof is held over one candle.** When the displacement *is*
+  the breaking candle, the gap it leaves spans (break−1, break, break+1) and therefore does
+  not exist when structure breaks — so requiring it there rejected the canonical setup every
+  time. In field journals 11 of 12 rejections had the block one or two candles before the
+  break, and ~46% of all candidates were being discarded. The magnitude proof is still
+  judged immediately (it can never improve); only velocity waits. Held-over blocks that then
+  qualify journal as `ObConfirmed`; magnitude failures now journal instead of returning
+  silently. **Expect more order blocks, appearing one bar later than before.**
+- **A degenerate impulse leg can no longer define the dealing range**
+  (`MinDealingRangeBars` 5, `MinDealingRangeAtr` 1.5×; 0 disables either). Legs of 1–3 bars
+  were driving equilibrium, the premium/discount verdict, the PD tolerance band and the OTE
+  pocket — one logged entry was vetoed by 0.2 points against an EQ derived from a single
+  candle. A rejected leg falls back to the confirmed swing pair, and `RangeAnchored` rows
+  now say which range was actually used.
+- **HTF zones show their direction.** Every HTF frame used to be the same gold, so a `4H FVG`
+  above price looked identical to one below it — and unlike chart-TF zones, which are filled
+  in their family's bull/bear colour, a frame gave no other cue. Bullish frames stay gold,
+  bearish frames are bronze (`HtfBearBorderColor`), and HTF tags carry ▲/▼.
+- **Journal CSVs open correctly in Excel.** They were valid UTF-8 but written without a BOM,
+  so Excel read them as ANSI and `ATR×1.5 — drift` arrived as `ATRÃ—1.5 â€" drift`.
+- **The HTF badge moved down** and gained a backdrop, so the platform's own watermark no
+  longer covers the fastest check that detection is healthy.
+
+**From the code audit:**
 
 - **Canonical order blocks are no longer rejected.** The imbalance scan started two
   candles after the order block, so the window that straddles the OB itself — the gap

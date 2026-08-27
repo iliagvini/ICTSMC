@@ -39,6 +39,9 @@ namespace ICTSMC
         // ever touched from the drawing thread.
         private readonly Dictionary<(int Argb, int Width, DashStyle Dash), RenderPen> _penCache = new();
 
+        /// <summary>One-shot latch so a permanent render fault is recorded once, not per frame.</summary>
+        private bool _renderErrorLogged;
+
         private RenderPen GetPen(Color color, int width = 1, DashStyle dash = DashStyle.Solid)
         {
             var key = (color.ToArgb(), width, dash);
@@ -90,9 +93,31 @@ namespace ICTSMC
                 if (HtfEnabled && ShowHtfInfoBadge)
                     RenderHtfBadge(context, region, model);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 // Drop the frame; the next one redraws from a fresh snapshot.
+                //
+                // But a throw here is usually PERMANENT, not transient — a bad setting
+                // combination reaches the same line on every frame — and the catch made that
+                // indistinguishable from "there is nothing to draw". Worse, layers render in
+                // sequence, so a fault part-way through leaves the earlier ones on screen and
+                // silently removes the rest. The first fault is therefore recorded.
+                if (!_renderErrorLogged)
+                {
+                    _renderErrorLogged = true;
+
+                    try
+                    {
+                        JournalEventAt(model.HasLiveCandle ? model.LiveCandle.Time : DateTime.Now,
+                            "RenderFailed", "", null, 0m,
+                            $"{ex.GetType().Name}: {ex.Message} — every chart layer after the " +
+                            "failure point was not drawn this frame");
+                    }
+                    catch
+                    {
+                        // Diagnostics must never themselves break the drawing thread.
+                    }
+                }
             }
         }
 
@@ -100,10 +125,28 @@ namespace ICTSMC
         /// Small badge in the chart corner showing the measured chart timeframe and
         /// the HTF layer(s) in use — so the auto selection is always verifiable at a glance.
         /// </summary>
+        /// <summary>
+        /// Vertical offset of the HTF badge from the top of the chart region. Platforms paint
+        /// their own attribution watermark ("Trading Platform by …") along the very top of the
+        /// same area, and at +8 the badge landed straight in it — legible only in fragments,
+        /// which matters because the badge is the fastest check that detection is healthy.
+        /// </summary>
+        private const int HtfBadgeTopOffset = 28;
+
         private void RenderHtfBadge(RenderContext context, Rectangle region, RenderModel model)
         {
             var text = string.IsNullOrEmpty(model.HtfInfo) ? "HTF: measuring chart timeframe…" : model.HtfInfo;
-            context.DrawString(text, ZoneFont, Color.FromArgb(190, 200, 200, 200), region.Left + 10, region.Top + 8);
+
+            var x = region.Left + 10;
+            var y = region.Top + HtfBadgeTopOffset;
+            var size = context.MeasureString(text, ZoneFont);
+
+            // Same translucent backdrop the zone labels use, so the badge stays readable
+            // over candles and over anything the platform draws underneath it.
+            context.FillRectangle(Color.FromArgb(LabelBackdropAlpha, 14, 17, 22),
+                new Rectangle(x - 4, y - 2, size.Width + 8, size.Height + 4));
+
+            context.DrawString(text, ZoneFont, Color.FromArgb(205, 200, 200, 200), x, y);
         }
 
         #region Zones
@@ -128,9 +171,16 @@ namespace ICTSMC
                 return pool.ToList();
 
             var price = model.LastClose;
-            var budget = model.Atr > 0 && ZoneVisibilityAtrRange > 0
-                ? model.Atr * ZoneVisibilityAtrRange
-                : decimal.MaxValue;
+
+            // "No distance limit" is carried as a FLAG, never as a sentinel value.
+            // Using decimal.MaxValue as the budget meant the HTF branch below computed
+            // decimal.MaxValue * 2, which overflows — and because OnRender's catch-all
+            // swallows the throw, every layer after this one (zones, liquidity, structure,
+            // the HTF badge) silently stopped drawing while premium/discount, rendered
+            // earlier in the frame, kept working. A chart showing only EQ and OTE was the
+            // visible symptom.
+            var unlimited = ZoneVisibilityAtrRange <= 0 || model.Atr <= 0;
+            var budget = unlimited ? 0m : model.Atr * ZoneVisibilityAtrRange;
 
             decimal Distance(ZoneView z) => z.Contains(price)
                 ? 0m
@@ -139,7 +189,7 @@ namespace ICTSMC
             var candidates = pool
                 .Where(z => z.State != ZoneState.Mitigated)
                 .Select(z => (Zone: z, Dist: Distance(z)))
-                .Where(t => t.Dist <= (t.Zone.IsHtf ? budget * 2 : budget))
+                .Where(t => unlimited || t.Dist <= (t.Zone.IsHtf ? budget * 2 : budget))
                 .ToList();
 
             var visible = new List<ZoneView>();
@@ -193,8 +243,8 @@ namespace ICTSMC
                 {
                     // HTF zones are frames, not fills — they outline confluence
                     // without stacking paint over the LTF zones inside them. The
-                    // heavier 2px stroke and the dedicated hue both mark them as HTF.
-                    context.DrawRectangle(GetPen(Color.FromArgb(220, HtfBorderColor), 2), rect);
+                    // heavier 2px stroke marks them as HTF; the hue marks the side.
+                    context.DrawRectangle(GetPen(Color.FromArgb(220, HtfColor(zone.IsBullish)), 2), rect);
                 }
                 else
                 {
@@ -242,7 +292,7 @@ namespace ICTSMC
             context.FillRectangle(Color.FromArgb(LabelBackdropAlpha, 14, 17, 22),
                 new Rectangle(textX - 3, textY - 1, size.Width + 6, size.Height + 2));
 
-            var labelColor = zone.IsHtf ? HtfBorderColor : baseColor;
+            var labelColor = zone.IsHtf ? HtfColor(zone.IsBullish) : baseColor;
             context.DrawString(zone.Tag, ZoneFont, Color.FromArgb(240, labelColor), textX, textY);
         }
 
@@ -278,6 +328,9 @@ namespace ICTSMC
                 Math.Min(y - size.Height / 2, region.Bottom - size.Height - 1));
             context.DrawString(text, StructureFont, textColor, textX, textY);
         }
+
+        /// <summary>Frame colour for an HTF zone — metallic either way, directional by hue.</summary>
+        private Color HtfColor(bool bullish) => bullish ? HtfBorderColor : HtfBearBorderColor;
 
         private Color ZoneColor(ZoneType type) => type switch
         {

@@ -1033,9 +1033,49 @@ namespace ICTSMC
         /// swing pair (order-corrected) before the first structure break or when
         /// the leg toggle is off.
         /// </summary>
+        /// <summary>
+        /// Whether the current impulse leg is substantial enough to define a dealing range.
+        ///
+        /// A leg is re-anchored on every structure break, so one that breaks immediately after
+        /// its extreme spans a bar or two — and equilibrium, the PD verdict, the PD tolerance
+        /// band and the OTE pocket are all measured from it. See MinDealingRangeBars.
+        /// </summary>
+        private bool LegIsUsableAsRange(out string reason)
+        {
+            reason = "";
+
+            if (_legDirection == 0 || _legAnchor == null || _legExtreme == null)
+            {
+                reason = "no leg anchored yet";
+                return false;
+            }
+
+            var span = Math.Abs(_legExtreme.Bar - _legAnchor.Bar);
+            if (MinDealingRangeBars > 0 && span < MinDealingRangeBars)
+            {
+                reason = $"leg spans {span} bars, below the {MinDealingRangeBars}-bar minimum";
+                return false;
+            }
+
+            var height = Math.Abs(_legExtreme.Price - _legAnchor.Price);
+            if (height <= 0m)
+            {
+                reason = "leg has no height";
+                return false;
+            }
+
+            if (MinDealingRangeAtr > 0m && _atr > 0m && height < _atr * MinDealingRangeAtr)
+            {
+                reason = $"leg height {Num(height)} below ATR×{MinDealingRangeAtr} = {Num(_atr * MinDealingRangeAtr)}";
+                return false;
+            }
+
+            return true;
+        }
+
         private (SwingPoint High, SwingPoint Low)? GetDealingRange()
         {
-            if (DealingRangeFromLeg && _legDirection != 0 && _legAnchor != null && _legExtreme != null)
+            if (DealingRangeFromLeg && LegIsUsableAsRange(out _))
             {
                 var legHigh = _legDirection == 1 ? _legExtreme : _legAnchor;
                 var legLow = _legDirection == 1 ? _legAnchor : _legExtreme;
@@ -1075,7 +1115,9 @@ namespace ICTSMC
         /// </summary>
         private (decimal Top, decimal Bottom)? GetOteBand()
         {
-            if (_legDirection == 0 || _legAnchor == null || _legExtreme == null)
+            // The retracement pocket is measured from the same leg, so it inherits the same
+            // guard: no band at all beats a band drawn across a two-candle "impulse".
+            if (!LegIsUsableAsRange(out _))
                 return null;
 
             var high = _legDirection == 1 ? _legExtreme.Price : _legAnchor.Price;

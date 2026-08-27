@@ -41,6 +41,9 @@ namespace ICTSMC
             DetectStructureBreak(bar);
             UpdateLegExtreme(bar);
             DetectFvg(bar);
+            // After this bar's own gap detection, so the freshly completed candle is
+            // available to any order block whose imbalance proof was held over.
+            ResolvePendingOrderBlocks(bar);
             ApplyBodyCloseMitigation(bar);
             UpdateSessionLevels(bar);
             UpdateHtf(bar);
@@ -505,9 +508,16 @@ namespace ICTSMC
 
             var legHigh = _legDirection == 1 ? _legExtreme.Price : _legAnchor.Price;
             var legLow = _legDirection == 1 ? _legAnchor.Price : _legExtreme.Price;
+
+            // Whether this leg is substantial enough to actually BE the dealing range is
+            // recorded with it — a rejected leg silently falls back to the swing pair, and
+            // the log should say which range the PD filter was really using.
+            var usable = LegIsUsableAsRange(out var why);
+
             JournalEvent(b, "RangeAnchored", evt.Bullish ? "Bull" : "Bear", null, (legHigh + legLow) / 2m,
                 $"{(evt.IsMss ? "MSS" : "BoS")} re-anchor: LegHigh={legHigh} (bar {(_legDirection == 1 ? _legExtreme.Bar : _legAnchor.Bar)}), " +
-                $"LegLow={legLow} (bar {(_legDirection == 1 ? _legAnchor.Bar : _legExtreme.Bar)}), EQ={(legHigh + legLow) / 2m}");
+                $"LegLow={legLow} (bar {(_legDirection == 1 ? _legAnchor.Bar : _legExtreme.Bar)}), EQ={(legHigh + legLow) / 2m}; " +
+                (usable ? "used as the dealing range" : $"NOT used as the dealing range ({why}) — falling back to the confirmed swing pair"));
         }
 
         /// <summary>Extends the current leg's running extreme as new bars complete.</summary>
@@ -557,19 +567,16 @@ namespace ICTSMC
                 if (!isOpposite)
                     continue;
 
-                // Magnitude: the impulse away from the OB candle must be meaningful.
+                // Magnitude: the impulse away from the OB candle must be meaningful. This is
+                // fully determined at the break and can never improve later, so a failure
+                // here is final — and now says so in the log rather than returning silently.
                 var impulse = bullish ? breakClose - c.Low : c.High - breakClose;
-                if (_atr > 0 && impulse < _atr * DisplacementAtrFactor)
-                    return;
-
-                // Velocity: the leg must have left an unfilled imbalance behind.
-                if (RequireImbalanceForOb && !LegHasImbalance(i, breakBar, bullish))
+                var required = _atr * DisplacementAtrFactor;
+                if (_atr > 0 && impulse < required)
                 {
                     JournalEvent(breakBar, "ObRejected", bullish ? "Bull" : "Bear", null, breakClose,
-                        $"no imbalance in the displacement leg (OB bar {i}, break bar {breakBar}; " +
-                        $"gap windows ending {ImbalanceScanStart(i, breakBar)}-{breakBar} all checked); " +
-                        $"distance {Num(impulse)} vs ATR×{DisplacementAtrFactor} = " +
-                        $"{Num(_atr * DisplacementAtrFactor)} — drift, not displacement");
+                        $"magnitude: impulse {Num(impulse)} from OB bar {i} to the break close is below " +
+                        $"ATR×{DisplacementAtrFactor} = {Num(required)} — drift, not displacement");
                     return;
                 }
 
@@ -585,6 +592,28 @@ namespace ICTSMC
                     bottom = c.Low;
                 }
 
+                // Velocity: the leg must have left an unfilled imbalance behind.
+                //
+                // If the gap is already there, the block is created now. If it is NOT, the
+                // decision is HELD OVER one candle rather than refused — because when the
+                // displacement is the breaking candle itself, the gap it leaves spans
+                // (break-1, break, break+1) and cannot exist yet. Refusing here discarded
+                // the canonical order block every time it appeared.
+                if (RequireImbalanceForOb && !LegHasImbalance(i, breakBar, bullish))
+                {
+                    _pendingOrderBlocks.Add(new PendingOrderBlock
+                    {
+                        ObBar = i,
+                        BreakBar = breakBar,
+                        Bullish = bullish,
+                        Top = top,
+                        Bottom = bottom,
+                        Impulse = impulse,
+                        Required = required
+                    });
+                    return;
+                }
+
                 AddZone(new Zone
                 {
                     Type = bullish ? ZoneType.BullOrderBlock : ZoneType.BearOrderBlock,
@@ -593,6 +622,55 @@ namespace ICTSMC
                     Bottom = bottom
                 }, breakBar);
                 return;
+            }
+        }
+
+        /// <summary>
+        /// Re-tests order blocks whose imbalance proof was held over, now that one more
+        /// candle has closed. Runs once per finalized bar, after that bar's own gap
+        /// detection, so the newly completed candle is available to the scan.
+        /// </summary>
+        private void ResolvePendingOrderBlocks(int bar)
+        {
+            if (_pendingOrderBlocks.Count == 0)
+                return;
+
+            for (var k = _pendingOrderBlocks.Count - 1; k >= 0; k--)
+            {
+                var p = _pendingOrderBlocks[k];
+
+                // Wait for the candle after the break to finish.
+                if (bar <= p.BreakBar)
+                    continue;
+
+                _pendingOrderBlocks.RemoveAt(k);
+
+                var lastIndex = Math.Min(p.BreakBar + 1, bar);
+                var direction = p.Bullish ? "Bull" : "Bear";
+
+                if (LegHasImbalance(p.ObBar, lastIndex, p.Bullish))
+                {
+                    AddZone(new Zone
+                    {
+                        Type = p.Bullish ? ZoneType.BullOrderBlock : ZoneType.BearOrderBlock,
+                        StartBar = p.ObBar,
+                        Top = p.Top,
+                        Bottom = p.Bottom
+                    }, bar);
+
+                    JournalEvent(bar, "ObConfirmed", direction, null, GetCandle(bar).Close,
+                        $"imbalance completed on the candle after the break (OB bar {p.ObBar}, " +
+                        $"break bar {p.BreakBar}, gap window ending {lastIndex}); " +
+                        $"impulse {Num(p.Impulse)} vs required {Num(p.Required)}");
+                }
+                else
+                {
+                    JournalEvent(bar, "ObRejected", direction, null, GetCandle(bar).Close,
+                        $"velocity: no imbalance in the displacement leg after allowing one extra " +
+                        $"candle (OB bar {p.ObBar}, break bar {p.BreakBar}; gap windows ending " +
+                        $"{ImbalanceScanStart(p.ObBar, lastIndex)}-{lastIndex} all checked). " +
+                        $"Magnitude had passed: impulse {Num(p.Impulse)} vs required {Num(p.Required)}");
+                }
             }
         }
 
@@ -957,6 +1035,69 @@ namespace ICTSMC
         /// The HTF equivalent of LegHasImbalance: the displacement leg on the HTF series
         /// must itself have left an unfilled 3-candle gap.
         /// </summary>
+        /// <summary>
+        /// Re-tests this layer's held-over order blocks now that one more of ITS candles has
+        /// closed. Candidates are located by first-chart-bar, so a trim of the candle buffer
+        /// between the break and the re-test cannot mis-resolve them.
+        /// </summary>
+        private void ResolvePendingHtfOrderBlocks(HtfAggregator agg, int chartBar)
+        {
+            if (_pendingHtfOrderBlocks.Count == 0)
+                return;
+
+            var candles = agg.Candles;
+
+            for (var k = _pendingHtfOrderBlocks.Count - 1; k >= 0; k--)
+            {
+                var p = _pendingHtfOrderBlocks[k];
+                if (p.Layer != agg.Label)
+                    continue;
+
+                var obIndex = candles.FindIndex(x => x.FirstChartBar == p.ObFirstChartBar);
+                var breakIndex = candles.FindIndex(x => x.FirstChartBar == p.BreakFirstChartBar);
+
+                // Either candle has been trimmed out of the buffer: the candidate can no
+                // longer be judged, so drop it rather than guess.
+                if (obIndex < 0 || breakIndex < 0 || breakIndex < obIndex)
+                {
+                    _pendingHtfOrderBlocks.RemoveAt(k);
+                    continue;
+                }
+
+                // Wait for a candle beyond the break to exist on this layer.
+                if (breakIndex + 1 >= candles.Count)
+                    continue;
+
+                _pendingHtfOrderBlocks.RemoveAt(k);
+
+                var lastIndex = breakIndex + 1;
+                var direction = p.Bullish ? "Bull" : "Bear";
+
+                if (HtfLegHasImbalance(candles, obIndex, lastIndex, p.Bullish))
+                {
+                    AddZone(new Zone
+                    {
+                        Type = p.Bullish ? ZoneType.BullOrderBlock : ZoneType.BearOrderBlock,
+                        IsHtf = true,
+                        HtfLabel = agg.Label,
+                        HtfMinutes = agg.Minutes,
+                        StartBar = p.ObFirstChartBar,
+                        Top = p.Top,
+                        Bottom = p.Bottom
+                    }, chartBar);
+
+                    JournalEvent(chartBar, "ObConfirmed", direction, null, 0m,
+                        $"[{agg.Label}] imbalance completed on the candle after the break");
+                }
+                else
+                {
+                    JournalEvent(chartBar, "ObRejected", direction, null, 0m,
+                        $"[{agg.Label}] velocity: no imbalance in the displacement leg after " +
+                        "allowing one extra candle of this layer");
+                }
+            }
+        }
+
         private bool HtfLegHasImbalance(List<HtfCandle> candles, int obIndex, int lastIndex, bool bullish)
         {
             var minGap = MinFvgTicks * InstrumentTickSize;
@@ -1686,6 +1827,11 @@ namespace ICTSMC
             // The order below mirrors OnBarComplete exactly - ATR, swings, structure
             // break (and the order block it produces), then fair value gaps, then
             // body-close settlement. Same rules, same sequence, different series.
+            // Held-over blocks first: the candle that just closed is the extra one they were
+            // waiting for, and resolving before this layer's new detections keeps the zone
+            // ordering the same as the chart timeframe's.
+            ResolvePendingHtfOrderBlocks(agg, chartBar);
+
             UpdateHtfStructure(agg, chartBar);
 
             if (HtfFvgEnabled && n >= 3)
@@ -1880,8 +2026,25 @@ namespace ICTSMC
                 if (st.Atr > 0 && impulse < st.Atr * DisplacementAtrFactor)
                     return;
 
+                var top = ObStyle == ObZoneStyle.Body ? Math.Max(cand.Open, cand.Close) : cand.High;
+                var bottom = ObStyle == ObZoneStyle.Body ? Math.Min(cand.Open, cand.Close) : cand.Low;
+
+                // Held over one candle of THIS layer when the gap has not formed yet, exactly
+                // as the chart timeframe does — the docs promise both run the same three
+                // conditions, and a fix applied to only one of them would make that false.
                 if (RequireImbalanceForOb && !HtfLegHasImbalance(c, i, breakBar, bullish))
+                {
+                    _pendingHtfOrderBlocks.Add(new PendingHtfOrderBlock
+                    {
+                        Layer = agg.Label,
+                        ObFirstChartBar = cand.FirstChartBar,
+                        BreakFirstChartBar = c[breakBar].FirstChartBar,
+                        Bullish = bullish,
+                        Top = top,
+                        Bottom = bottom
+                    });
                     return;
+                }
 
                 AddZone(new Zone
                 {
@@ -1890,8 +2053,8 @@ namespace ICTSMC
                     HtfLabel = agg.Label,
                     HtfMinutes = agg.Minutes,
                     StartBar = cand.FirstChartBar,
-                    Top = ObStyle == ObZoneStyle.Body ? Math.Max(cand.Open, cand.Close) : cand.High,
-                    Bottom = ObStyle == ObZoneStyle.Body ? Math.Min(cand.Open, cand.Close) : cand.Low
+                    Top = top,
+                    Bottom = bottom
                 }, chartBar);
                 return;
             }

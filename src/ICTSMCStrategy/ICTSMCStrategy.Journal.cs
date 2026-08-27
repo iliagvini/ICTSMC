@@ -73,6 +73,17 @@ namespace ICTSMC
         private Task _ioChain = Task.CompletedTask;
         private readonly object _ioChainLock = new();
 
+        /// <summary>
+        /// UTF-8 WITH a byte-order mark.
+        ///
+        /// The rows carry non-ASCII characters — "ATR×1.5", em dashes, the ▲/▼ direction
+        /// glyphs on HTF tags — and .NET writes UTF-8 without a BOM by default. Excel then
+        /// opens the file as the system ANSI codepage, so "ATR×1.5 — drift" arrives as
+        /// "ATRÃ—1.5 â€" drift". The bytes were never wrong; the file simply never said what
+        /// they were. A BOM is written once, when the file is created, and appends skip it.
+        /// </summary>
+        private static readonly Encoding JournalEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true);
+
         private readonly List<SignalRecord> _openSignals = new();
         private readonly List<SignalRecord> _resolvedSignals = new();
 
@@ -208,7 +219,7 @@ namespace ICTSMC
             EnqueueIo(() =>
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
-                File.AppendAllLines(path, lines);
+                File.AppendAllLines(path, lines, JournalEncoding);
             });
         }
 
@@ -732,7 +743,7 @@ namespace ICTSMC
 
                 var text = BuildAnalytics(snapshot, trimmed);
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
-                File.WriteAllText(path, text);
+                File.WriteAllText(path, text, JournalEncoding);
             });
         }
 

@@ -231,7 +231,7 @@ namespace ICTSMC
 
                 if (z.IsHtf)
                 {
-                    using var framePen = new Pen(Color.FromArgb(220, HtfBorderColor), 1);
+                    using var framePen = new Pen(Color.FromArgb(220, HtfColor(z.IsBullish)), 1);
                     g.DrawRectangle(framePen, rect.X, rect.Y, rect.Width, rect.Height);
                 }
                 else
@@ -246,7 +246,7 @@ namespace ICTSMC
                 var size = g.MeasureString(tag, fontSmall);
                 if (size.Width < rect.Width - 4 && size.Height < rect.Height + 4)
                 {
-                    using var tagBrush = new SolidBrush(Color.FromArgb(210, z.IsHtf ? HtfBorderColor : baseColor));
+                    using var tagBrush = new SolidBrush(Color.FromArgb(210, z.IsHtf ? HtfColor(z.IsBullish) : baseColor));
                     g.DrawString(tag, fontSmall, tagBrush,
                         rect.X + (rect.Width - size.Width) / 2f,
                         rect.Y + (rect.Height - size.Height) / 2f);
