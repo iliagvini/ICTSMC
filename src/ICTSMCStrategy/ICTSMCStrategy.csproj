@@ -2,13 +2,24 @@
 
   <PropertyGroup>
     <!--
-      ATAS X (8.0.14+) ships .NET 10 assemblies, so the project targets
+      Current ATAS builds (8.0.14+) ship .NET 10 assemblies, so the project targets
       net10.0-windows by default. For an older .NET 8-based ATAS install,
       build with: dotnet build -p:AtasTfm=net8.0-windows
     -->
-    <!-- ATAS install folder: pass /p:AtasPath=... to override; ATAS X is probed first. -->
-    <AtasPath Condition="'$(AtasPath)' == '' AND Exists('C:\Program Files\ATAS X')">C:\Program Files\ATAS X</AtasPath>
-    <AtasPath Condition="'$(AtasPath)' == '' AND Exists('C:\Program Files\ATAS Platform')">C:\Program Files\ATAS Platform</AtasPath>
+    <!--
+      ATAS install folder: pass /p:AtasPath=... to override.
+
+      Standard ATAS ("ATAS Platform") is probed FIRST, and wins whenever it and ATAS X
+      are installed side by side: linking against the wrong platform's assemblies
+      produces a DLL whose references the running ATAS cannot bind.
+
+      Each candidate is probed for ATAS.Indicators.dll rather than for the folder alone.
+      A directory-only test matched a leftover or partially-removed install and then
+      failed the build against a folder with no assemblies in it.
+    -->
+    <AtasPath Condition="'$(AtasPath)' == '' AND Exists('C:\Program Files\ATAS Platform\ATAS.Indicators.dll')">C:\Program Files\ATAS Platform</AtasPath>
+    <AtasPath Condition="'$(AtasPath)' == '' AND Exists('C:\Program Files (x86)\ATAS Platform\ATAS.Indicators.dll')">C:\Program Files (x86)\ATAS Platform</AtasPath>
+    <AtasPath Condition="'$(AtasPath)' == '' AND Exists('C:\Program Files\ATAS X\ATAS.Indicators.dll')">C:\Program Files\ATAS X</AtasPath>
     <AtasPath Condition="'$(AtasPath)' == ''">C:\Program Files (x86)\ATAS Platform</AtasPath>
 
     <!--
@@ -71,7 +82,7 @@
     <Message Importance="high"
              Text="ICTSMC: ATAS folder = '$(AtasPath)'  |  TargetFramework = $(TargetFramework)" />
     <Error Condition="!Exists('$(AtasPath)\ATAS.Indicators.dll')"
-           Text="ATAS.Indicators.dll was not found in '$(AtasPath)'.%0A%0AThis project must be built on a machine where ATAS is installed - it links against the ATAS assemblies.%0A%0AFix: pass your ATAS folder explicitly, e.g.%0A    dotnet build src/ICTSMCStrategy/ICTSMCStrategy.csproj -c Release -p:AtasPath=&quot;C:\Program Files\ATAS X&quot;%0A%0AThe folder is the one containing ATAS.Indicators.dll and OFT.Rendering.dll (next to OFT.Platform.exe)." />
+           Text="ATAS.Indicators.dll was not found in '$(AtasPath)'.%0A%0AThis project must be built on a machine where ATAS is installed - it links against the ATAS assemblies.%0A%0AFix: pass your ATAS folder explicitly, e.g.%0A    dotnet build src/ICTSMCStrategy/ICTSMCStrategy.csproj -c Release -p:AtasPath=&quot;C:\Program Files (x86)\ATAS Platform&quot;%0A%0AThe folder is the one containing ATAS.Indicators.dll and OFT.Rendering.dll (next to OFT.Platform.exe)." />
     <Error Condition="!Exists('$(AtasPath)\OFT.Rendering.dll')"
            Text="OFT.Rendering.dll was not found in '$(AtasPath)'.%0A%0AATAS.Indicators.dll resolved but OFT.Rendering.dll did not, so '$(AtasPath)' is probably not the real ATAS program folder.%0A%0AFix: point -p:AtasPath=... at the folder that contains BOTH DLLs." />
   </Target>

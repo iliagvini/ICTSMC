@@ -19,10 +19,15 @@ set "ATASDIR=%~2"
 set "NOCOPY=%~3"
 
 REM ---- locate the ATAS program folder --------------------------------------
+REM  Standard ATAS ("ATAS Platform") is probed FIRST and wins whenever both it and
+REM  ATAS X are installed side by side - building against the wrong one produces a
+REM  DLL that references assembly versions the running platform does not have.
+REM  ATAS X stays as a last-resort fallback so the project still builds on a machine
+REM  that only has it. Pass a folder explicitly to override either way.
 if not "%ATASDIR%"=="" goto :haveatas
-if exist "C:\Program Files\ATAS X\ATAS.Indicators.dll"                       set "ATASDIR=C:\Program Files\ATAS X"
-if "%ATASDIR%"=="" if exist "C:\Program Files\ATAS Platform\ATAS.Indicators.dll"       set "ATASDIR=C:\Program Files\ATAS Platform"
+if exist "C:\Program Files\ATAS Platform\ATAS.Indicators.dll"                set "ATASDIR=C:\Program Files\ATAS Platform"
 if "%ATASDIR%"=="" if exist "C:\Program Files (x86)\ATAS Platform\ATAS.Indicators.dll" set "ATASDIR=C:\Program Files (x86)\ATAS Platform"
+if "%ATASDIR%"=="" if exist "C:\Program Files\ATAS X\ATAS.Indicators.dll"              set "ATASDIR=C:\Program Files\ATAS X"
 :haveatas
 
 if "%ATASDIR%"=="" (
@@ -31,7 +36,7 @@ if "%ATASDIR%"=="" (
   echo   ATAS must be installed on THIS machine - the indicator links against
   echo   ATAS.Indicators.dll and OFT.Rendering.dll from the ATAS program folder.
   echo.
-  echo   Pass it explicitly:  build.cmd "%OUTDIR%" "C:\Program Files\ATAS X"
+  echo   Pass it explicitly:  build.cmd "%OUTDIR%" "C:\Program Files (x86)\ATAS Platform"
   exit /b 1
 )
 

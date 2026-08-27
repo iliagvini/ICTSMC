@@ -189,9 +189,11 @@ Requirements: ATAS installed on the build machine, plus the .NET **SDK** matchin
 runtime your ATAS runs on.
 
 The project reads `OFT.Platform.runtimeconfig.json` from your ATAS folder and targets that
-framework automatically — the install *folder name* is not a reliable signal (an
-`(x86)\ATAS Platform` install can be running .NET 10). The build prints the resolved
-framework on a line starting `ICTSMC:`. Override with `-p:AtasTfm=net8.0-windows` if needed.
+framework automatically — the install *folder name* is not a reliable signal, and current
+standard ATAS is a live example: `C:\Program Files (x86)\ATAS Platform` reports
+`"tfm": "net10.0"` despite the `(x86)` path. The build prints both the resolved folder and
+the framework on a line starting `ICTSMC:`; check it matches the ATAS you actually run.
+Override with `-p:AtasTfm=net8.0-windows` if needed.
 
 **One command (Windows)** — builds Release into `<repo>\dist` and installs the DLL into
 your ATAS Indicators folder:
@@ -220,15 +222,34 @@ which one it used. Restart ATAS afterwards, then add **ICT/SMC Strategy** from t
 Manual equivalents:
 
 ```bash
-# ATAS X (default — targets net10.0-windows, probes "C:\Program Files\ATAS X" automatically)
+# Standard ATAS (default — probed automatically, framework read from the install)
 dotnet build src/ICTSMCStrategy/ICTSMCStrategy.csproj -c Release
 
 # explicit path
+dotnet build src/ICTSMCStrategy/ICTSMCStrategy.csproj -c Release -p:AtasPath="C:\Program Files (x86)\ATAS Platform"
+
+# ATAS X, if that is what you actually run
 dotnet build src/ICTSMCStrategy/ICTSMCStrategy.csproj -c Release -p:AtasPath="C:\Program Files\ATAS X"
 
-# older .NET 8-based ATAS Platform
+# older .NET 8-based install
 dotnet build src/ICTSMCStrategy/ICTSMCStrategy.csproj -c Release -p:AtasTfm=net8.0-windows -p:AtasPath="C:\Program Files (x86)\ATAS Platform"
 ```
+
+> **Build against the platform you actually run.** Standard ATAS ("ATAS Platform") is
+> probed first and wins whenever it and ATAS X are installed side by side; ATAS X is only
+> a fallback for machines that have nothing else. This is not cosmetic — the two ship
+> *different assembly versions* of the same assemblies (e.g. `ATAS.Indicators`
+> 8.0.14.397 vs 8.0.14.647), so a DLL linked against one records references the other
+> does not provide, and the indicator can fail to load. Each candidate folder is probed
+> for `ATAS.Indicators.dll` rather than for the folder alone, so a leftover install
+> directory can no longer win the probe and then fail the build.
+>
+> You can confirm what your build actually linked against:
+>
+> ```powershell
+> [Reflection.Assembly]::LoadFrom("$env:APPDATA\ATAS\Indicators\ICTSMCStrategy.dll").GetReferencedAssemblies() |
+>   Where-Object Name -match 'ATAS|OFT' | Select-Object Name, Version
+> ```
 
 Copy `src/ICTSMCStrategy/bin/Release/ICTSMCStrategy.dll` into
 the ATAS Indicators folder (see the note above — normally
