@@ -231,7 +231,12 @@ namespace ICTSMC
 
                 if (z.IsHtf)
                 {
-                    using var framePen = new Pen(Color.FromArgb(220, HtfColor(z.IsBullish)), 1);
+                    // Same encoding as the chart: hue = direction, weight and dash = layer.
+                    var (frameWidth, frameDash) = HtfStroke(z.HtfMinutes);
+                    using var framePen = new Pen(Color.FromArgb(220, HtfColor(z.IsBullish)), frameWidth)
+                    {
+                        DashStyle = frameDash
+                    };
                     g.DrawRectangle(framePen, rect.X, rect.Y, rect.Width, rect.Height);
                 }
                 else

@@ -767,14 +767,17 @@ namespace ICTSMC
         public Color HtfBorderColor { get; set; } = Color.FromArgb(0xFF, 0xD4, 0xAF, 0x37);
 
         /// <summary>
-        /// Bearish HTF frames. Previously every HTF zone drew in one gold, so a 4H FVG above
-        /// price looked identical to one below it — and unlike chart-timeframe zones, which
-        /// are filled in their family's bull/bear colour, a frame gave no other cue. Bronze
-        /// stays in the same metallic family as the gold, so HTF zones still read as a set,
-        /// while being unmistakably the other direction.
+        /// Bearish HTF frames.
+        ///
+        /// The first attempt at this used bronze, which is only about 20° of hue from the
+        /// gold — on a dark chart at frame opacity the two were indistinguishable, so the
+        /// zones still read as "all gold". This periwinkle sits nearly opposite gold on the
+        /// wheel, giving an immediate warm/cool split, and occupies a gap the rest of the
+        /// palette leaves empty: clear of the blue FVG (204°), the purple iFVG (282°) and
+        /// the red order block (6°), so it cannot be mistaken for a chart-timeframe zone.
         /// </summary>
         [Display(GroupName = GrpHtf, Name = "HTF bearish zone border", Order = 746)]
-        public Color HtfBearBorderColor { get; set; } = Color.FromArgb(0xFF, 0xC0, 0x70, 0x3A);
+        public Color HtfBearBorderColor { get; set; } = Color.FromArgb(0xFF, 0x7B, 0x84, 0xD8);
 
         private int _maxHtfZones = 12;
         [Display(GroupName = GrpHtf, Name = "Max HTF zones per layer", Order = 750)]

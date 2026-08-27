@@ -449,6 +449,8 @@ namespace ICTSMC
     {
         public readonly ZoneType Type;
         public readonly bool IsHtf;
+        /// <summary>Minutes of the HTF layer (0 for chart-TF zones) — drives the frame weight.</summary>
+        public readonly int HtfMinutes;
         public readonly bool IsBullish;
         public readonly bool IsOrderBlock;
         public readonly string Tag;
@@ -464,6 +466,7 @@ namespace ICTSMC
         {
             Type = z.Type;
             IsHtf = z.IsHtf;
+            HtfMinutes = z.HtfMinutes;
             IsBullish = z.IsBullish;
             IsOrderBlock = z.IsOrderBlock;
             Tag = z.Tag;
