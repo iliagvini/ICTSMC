@@ -77,6 +77,15 @@ namespace ICTSMC
         Manual
     }
 
+    /// <summary>How the weekly bucket's WEEKDAY boundary is chosen (separate from the minute-of-day anchor).</summary>
+    public enum WeekAnchorMode
+    {
+        /// <summary>Sunday when a recurring daily session gap was detected (futures), Monday otherwise (calendar week).</summary>
+        Auto,
+        /// <summary>Use the fixed WeeklyAnchorDay value.</summary>
+        Manual
+    }
+
     /// <summary>Where a liquidity pool came from.</summary>
     public enum LiquidityOrigin
     {
@@ -98,7 +107,15 @@ namespace ICTSMC
         public string HtfLabel = "";
         /// <summary>Minutes of the HTF layer (0 for chart-TF zones). Drives confluence scoring.</summary>
         public int HtfMinutes;
+        /// <summary>Chart bar the zone's GEOMETRY starts at — where it is drawn from.</summary>
         public int StartBar;
+        /// <summary>
+        /// Chart bar the zone became KNOWN at. For chart-timeframe zones this is close to
+        /// <see cref="StartBar"/>, but an HTF zone's geometry starts at the first chart bar of
+        /// its own candle — up to a full HTF candle earlier than the moment it could be detected.
+        /// "Is this zone fresh?" must be asked of this field, never of StartBar.
+        /// </summary>
+        public int CreatedBar;
         public decimal Top;
         public decimal Bottom;
         public ZoneState State = ZoneState.Active;
@@ -112,12 +129,19 @@ namespace ICTSMC
         public bool BreakerSpawned;
         /// <summary>First-touch journaling latch (independent of the alert toggle).</summary>
         public bool TouchLogged;
-        /// <summary>Latch: PD-filter rejection already journaled for this zone.</summary>
-        public bool PdRejectLogged;
-        /// <summary>Latch: OTE-filter rejection already journaled for this zone.</summary>
-        public bool OteRejectLogged;
-        /// <summary>Latch: "armed while price was already inside" rejection already journaled.</summary>
-        public bool EdgeRejectLogged;
+
+        // Entry-rejection latches. These are keyed on the TOUCH EPISODE rather than latched
+        // forever: equilibrium moves as the leg extends, so the same zone can legitimately be
+        // vetoed on one presentation and accepted on the next. A permanent latch produced a
+        // rejection row followed by a signal row for the same zone with nothing in between to
+        // explain the change of verdict — the one thing the decision log exists to prevent.
+        /// <summary>Touch episode whose PD-filter rejection is already journaled (-1 = none).</summary>
+        public int PdRejectEpisode = -1;
+        /// <summary>Touch episode whose OTE-filter rejection is already journaled (-1 = none).</summary>
+        public int OteRejectEpisode = -1;
+        /// <summary>Touch episode whose "no approach from outside the edge" rejection is journaled (-1 = none).</summary>
+        public int EdgeRejectEpisode = -1;
+
         /// <summary>Latch: a C-tier continuation signal already fired from this zone.</summary>
         public bool ContinuationFired;
         /// <summary>Last bar on which price was in contact with the zone (-1 = never).
@@ -227,15 +251,26 @@ namespace ICTSMC
         public decimal Tp3;
         public string PdStatus = "";
         public string Confluence = "";
+        /// <summary>Higher-timeframe structural bias at the moment of the signal ("4H↑ D↑").</summary>
+        public string HtfBias = "";
         public int SignalBar;
         /// <summary>Id of the zone that triggered this signal (for invalidation alerts).</summary>
         public int TriggerZoneId;
 
-        // Signal-bar excursion split. The signal fires INTRABAR, so the developing
-        // candle's extremes at that instant separate pre-entry price action from
-        // post-entry exposure: only excursion beyond these belongs to the trade.
+        // Signal-bar excursion split. Live, the signal fires INTRABAR, so the developing
+        // candle's extremes at that instant separate pre-entry price action from post-entry
+        // exposure: only excursion beyond these belongs to the trade.
+        //
+        // In HISTORY REPLAY there is no such split — the candle handed to the intrabar engine
+        // is already complete, so its extremes ARE the final extremes and "excursion beyond
+        // them" is empty by construction. Both marks are therefore anchored at the entry price
+        // for replayed signals, which makes the whole signal-bar range count as the trade's
+        // exposure: the same conservative, stop-first reading the resolver applies everywhere
+        // else. Without that, a replayed signal could never record a same-bar stop-out.
         public decimal HighAtSignal;
         public decimal LowAtSignal;
+        /// <summary>False for replayed signals, where intrabar ordering is unknowable.</summary>
+        public bool IntrabarSequenced;
 
         // Excursion tracking (absolute price units; reported in R).
         public decimal Mae;
@@ -286,10 +321,6 @@ namespace ICTSMC
     }
 
     /// <summary>
-    /// One higher-timeframe layer: aggregates chart candles into fixed time buckets
-    /// and keeps the resulting synthetic series.
-    /// </summary>
-    /// <summary>
     /// Per-layer market-structure state: the SAME bookkeeping the chart timeframe keeps,
     /// held separately for each synthetic HTF series so the identical swing/BoS/order-block
     /// rules can run on it.
@@ -300,6 +331,9 @@ namespace ICTSMC
         public readonly System.Collections.Generic.List<SwingPoint> Lows = new();
         public SwingPoint LastHigh;
         public SwingPoint LastLow;
+
+        /// <summary>+1 bullish, -1 bearish, 0 undefined — this layer's own structural bias.</summary>
+        public int Trend;
 
         // Wilder ATR of this series, seeded from a full-period simple average.
         public decimal Atr;
@@ -330,6 +364,9 @@ namespace ICTSMC
 
             return take > 0 ? sum / take : 0m;
         }
+
+        /// <summary>Arrow form of this layer's bias, for alerts and the journal.</summary>
+        public string BiasGlyph => Structure.Trend switch { 1 => "↑", -1 => "↓", _ => "·" };
     }
 
     /// <summary>An intraday time window (minutes after midnight, platform time).</summary>
@@ -352,11 +389,12 @@ namespace ICTSMC
 
     #region Immutable render model
 
-    // OnRender and OnCalculate run on DIFFERENT ATAS threads. Rather than lock the
-    // hot trading path for the duration of a draw, the calculation thread publishes
-    // an immutable snapshot of everything the renderer needs; the renderer performs
-    // a single volatile reference read and then works entirely from value types.
-    // No shared mutable collection is ever enumerated across threads.
+    // OnRender and OnCalculate run on DIFFERENT ATAS threads, and so does the Telegram
+    // /shot snapshot renderer. Rather than lock the hot trading path for the duration of a
+    // draw, the calculation thread publishes an immutable snapshot of everything any
+    // consumer needs; each consumer performs a single volatile reference read and then
+    // works entirely from value types. No shared mutable collection is ever enumerated
+    // across threads, and no `decimal` is ever read while it is being written.
 
     internal readonly struct ZoneView
     {
@@ -437,53 +475,74 @@ namespace ICTSMC
         }
     }
 
-    /// <summary>Immutable snapshot handed from the calculation thread to the renderer.</summary>
+    /// <summary>
+    /// One candle, copied out of the ATAS series by the calculation thread so background
+    /// consumers (the /shot snapshot) never call GetCandle from their own thread.
+    /// </summary>
+    internal readonly struct CandleView
+    {
+        public readonly DateTime Time;
+        public readonly decimal Open;
+        public readonly decimal High;
+        public readonly decimal Low;
+        public readonly decimal Close;
+
+        public CandleView(DateTime time, decimal open, decimal high, decimal low, decimal close)
+        {
+            Time = time;
+            Open = open;
+            High = high;
+            Low = low;
+            Close = close;
+        }
+    }
+
+    /// <summary>
+    /// Immutable snapshot handed from the calculation thread to every other thread.
+    ///
+    /// The collections are rebuilt only when engine state actually changed; the scalars are
+    /// refreshed on every publish, because price-relative work (zone distance culling, the
+    /// live candle) must stay current even on ticks that changed no state.
+    /// </summary>
     internal sealed class RenderModel
     {
-        public static readonly RenderModel Empty = new(
-            new List<ZoneView>(), new List<LiquidityView>(), new List<StructureView>(),
-            0m, 0m, 0, false, 0m, 0m, 0, false, 0m, 0m, "");
+        public static readonly RenderModel Empty = new();
 
-        public readonly List<ZoneView> Zones;
-        public readonly List<LiquidityView> Liquidity;
-        public readonly List<StructureView> Structure;
-        public readonly decimal Atr;
-        public readonly decimal LastClose;
-        public readonly int LastBar;
+        private static readonly List<ZoneView> NoZones = new();
+        private static readonly List<LiquidityView> NoLiquidity = new();
+        private static readonly List<StructureView> NoStructure = new();
+        private static readonly List<CandleView> NoCandles = new();
 
-        public readonly bool HasRange;
-        public readonly decimal RangeHigh;
-        public readonly decimal RangeLow;
-        public readonly int RangeAnchorBar;
+        public IReadOnlyList<ZoneView> Zones { get; init; } = NoZones;
+        public IReadOnlyList<LiquidityView> Liquidity { get; init; } = NoLiquidity;
+        public IReadOnlyList<StructureView> Structure { get; init; } = NoStructure;
 
-        public readonly bool HasOte;
-        public readonly decimal OteTop;
-        public readonly decimal OteBottom;
+        /// <summary>Completed chart candles, most recent last. Empty unless a consumer needs them.</summary>
+        public IReadOnlyList<CandleView> Candles { get; init; } = NoCandles;
+        /// <summary>Chart bar index of <see cref="Candles"/>[0].</summary>
+        public int CandlesFirstBar { get; init; }
 
-        public readonly string HtfInfo;
+        /// <summary>The still-forming candle, refreshed on every publish.</summary>
+        public bool HasLiveCandle { get; init; }
+        public CandleView LiveCandle { get; init; }
+        public int LiveBar { get; init; }
+
+        public decimal Atr { get; init; }
+        public decimal LastClose { get; init; }
+        public int LastBar { get; init; }
+
+        public bool HasRange { get; init; }
+        public decimal RangeHigh { get; init; }
+        public decimal RangeLow { get; init; }
+        public int RangeAnchorBar { get; init; }
+
+        public bool HasOte { get; init; }
+        public decimal OteTop { get; init; }
+        public decimal OteBottom { get; init; }
+
+        public string HtfInfo { get; init; } = "";
 
         public decimal RangeEq => (RangeHigh + RangeLow) / 2m;
-
-        public RenderModel(List<ZoneView> zones, List<LiquidityView> liquidity, List<StructureView> structure,
-            decimal atr, decimal lastClose, int lastBar,
-            bool hasRange, decimal rangeHigh, decimal rangeLow, int rangeAnchorBar,
-            bool hasOte, decimal oteTop, decimal oteBottom, string htfInfo)
-        {
-            Zones = zones;
-            Liquidity = liquidity;
-            Structure = structure;
-            Atr = atr;
-            LastClose = lastClose;
-            LastBar = lastBar;
-            HasRange = hasRange;
-            RangeHigh = rangeHigh;
-            RangeLow = rangeLow;
-            RangeAnchorBar = rangeAnchorBar;
-            HasOte = hasOte;
-            OteTop = oteTop;
-            OteBottom = oteBottom;
-            HtfInfo = htfInfo ?? "";
-        }
     }
 
     #endregion

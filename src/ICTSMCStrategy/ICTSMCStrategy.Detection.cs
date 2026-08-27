@@ -16,6 +16,13 @@ namespace ICTSMC
         private const decimal ZoneDuplicateOverlap = 0.7m;
 
         /// <summary>
+        /// How similar in HEIGHT two overlapping zones must be to count as duplicates.
+        /// Below this the smaller zone is a materially tighter version of the same level and
+        /// is kept on its own merits.
+        /// </summary>
+        private const decimal ZoneDuplicateSizeRatio = 0.6m;
+
+        /// <summary>
         /// Runs once per finalized candle. All pattern DETECTION happens here;
         /// touch/sweep/mitigation REACTION happens intrabar in ProcessIntrabar.
         /// </summary>
@@ -23,6 +30,10 @@ namespace ICTSMC
         {
             if (bar < 1)
                 return;
+
+            // Measured first, and unconditionally: the chart's own timeframe is a property
+            // of the chart, not of the HTF feature that used to own it.
+            UpdateChartTimeframe(bar);
 
             UpdateAtr(bar);
             ClassifyFinishedSweeps(bar);
@@ -284,7 +295,7 @@ namespace ICTSMC
             if (_lastSwingHigh is { Broken: false } && close > _lastSwingHigh.Price)
             {
                 _lastSwingHigh.Broken = true;
-                var isMss = _trend == -1;
+                var isMss = ClassifyBreak(bar, bullish: true, reversal: _trend == -1);
                 _trend = 1;
 
                 var evt = new StructureEvent
@@ -304,11 +315,14 @@ namespace ICTSMC
                 // must not silently change which signals the engine produces.
                 CreateOrderBlock(bar, bullish: true);
             }
-
-            if (_lastSwingLow is { Broken: false } && close < _lastSwingLow.Price)
+            // Mutually exclusive by construction (a close cannot be both above the protected
+            // high and below the protected low unless the two have crossed), and written as
+            // an else so a degenerate anchor state can never produce two structure events,
+            // two trend flips, two order blocks and two leg re-anchors on one bar.
+            else if (_lastSwingLow is { Broken: false } && close < _lastSwingLow.Price)
             {
                 _lastSwingLow.Broken = true;
-                var isMss = _trend == 1;
+                var isMss = ClassifyBreak(bar, bullish: false, reversal: _trend == 1);
                 _trend = -1;
 
                 var evt = new StructureEvent
@@ -326,6 +340,74 @@ namespace ICTSMC
 
                 CreateOrderBlock(bar, bullish: false);
             }
+        }
+
+        /// <summary>
+        /// Decides whether a break counts as a Market Structure Shift.
+        ///
+        /// A reversal-direction break is the NECESSARY condition, and used to be the only
+        /// one — which made "MSS" a synonym for "this break went the other way to the last
+        /// one". In a range that is every oscillation between the same two extremes, and
+        /// because an MSS is what arms the entry model, the machine was most active exactly
+        /// where the book says to stand aside.
+        ///
+        /// With <see cref="RequireDisplacementForMss"/> a reversal must also DISPLACE to earn
+        /// the label. The break is otherwise recorded as an ordinary BoS: it still flips the
+        /// tracked trend and still produces its order block, it simply does not arm a
+        /// reversal setup.
+        /// </summary>
+        private bool ClassifyBreak(int bar, bool bullish, bool reversal)
+        {
+            if (!reversal || !RequireDisplacementForMss)
+                return reversal;
+
+            if (BreakDisplaced(bar, bullish, out var impulse, out var required, out var hasImbalance))
+                return true;
+
+            JournalEvent(bar, "MssDemoted", bullish ? "Bull" : "Bear", null, GetCandle(bar).Close,
+                $"reversal break did not displace — recorded as BoS, entry model not armed; " +
+                $"impulse {Num(impulse)} vs ATR×{DisplacementAtrFactor} = {Num(required)}; " +
+                $"imbalance in leg: {(hasImbalance ? "yes" : "no")}");
+
+            return false;
+        }
+
+        /// <summary>
+        /// The two proofs of displacement, applied to a structure break's own leg — the same
+        /// pair <see cref="CreateOrderBlock"/> demands, for the same reason: raw distance is
+        /// not displacement without the velocity that leaves an imbalance behind.
+        /// </summary>
+        private bool BreakDisplaced(int breakBar, bool bullish, out decimal impulse, out decimal required,
+            out bool hasImbalance)
+        {
+            var from = Math.Max(1, breakBar - ObLookback);
+            var close = GetCandle(breakBar).Close;
+
+            // Origin of the leg into the break: its most extreme counter-side price.
+            var originBar = from;
+            var originPrice = bullish ? GetCandle(from).Low : GetCandle(from).High;
+
+            for (var i = from; i <= breakBar; i++)
+            {
+                var c = GetCandle(i);
+                if (bullish)
+                {
+                    if (c.Low < originPrice) { originPrice = c.Low; originBar = i; }
+                }
+                else
+                {
+                    if (c.High > originPrice) { originPrice = c.High; originBar = i; }
+                }
+            }
+
+            impulse = bullish ? close - originPrice : originPrice - close;
+            required = _atr * DisplacementAtrFactor;
+            hasImbalance = LegHasImbalance(originBar, breakBar, bullish);
+
+            if (_atr > 0 && impulse < required)
+                return false;
+
+            return hasImbalance;
         }
 
         /// <summary>
@@ -484,8 +566,10 @@ namespace ICTSMC
                 if (RequireImbalanceForOb && !LegHasImbalance(i, breakBar, bullish))
                 {
                     JournalEvent(breakBar, "ObRejected", bullish ? "Bull" : "Bear", null, breakClose,
-                        $"no imbalance in the displacement leg (bars {i}-{breakBar}); distance {Num(impulse)} " +
-                        $"vs ATR×{DisplacementAtrFactor} = {Num(_atr * DisplacementAtrFactor)} — drift, not displacement");
+                        $"no imbalance in the displacement leg (OB bar {i}, break bar {breakBar}; " +
+                        $"gap windows ending {ImbalanceScanStart(i, breakBar)}-{breakBar} all checked); " +
+                        $"distance {Num(impulse)} vs ATR×{DisplacementAtrFactor} = " +
+                        $"{Num(_atr * DisplacementAtrFactor)} — drift, not displacement");
                     return;
                 }
 
@@ -507,21 +591,44 @@ namespace ICTSMC
                     StartBar = i,
                     Top = top,
                     Bottom = bottom
-                });
+                }, breakBar);
                 return;
             }
         }
 
         /// <summary>
+        /// First three-candle window an imbalance scan examines for a displacement leg
+        /// running from <paramref name="legStartBar"/> to <paramref name="breakBar"/>.
+        ///
+        /// The scan starts at the leg's FIRST candle, not its second. A window ending at
+        /// bar <c>b</c> spans <c>[b-2, b]</c>, so the window ending at <c>legStart + 1</c>
+        /// straddles the leg's opening candle — and that is precisely where an order
+        /// block's own gap sits: the OB candle, then one explosive candle whose low opens
+        /// clear of the high before the OB. Starting at <c>legStart + 2</c> skipped that
+        /// window, so whenever the order block sat immediately before the breaking candle
+        /// the loop ran zero times and the most textbook OB shape in the book was rejected
+        /// as "drift, not displacement".
+        ///
+        /// The result is also clamped so the window ending at the break bar is ALWAYS
+        /// examined. A leg can be a single engulfing candle that is itself the whole move;
+        /// it must be judged on the gap it left rather than not judged at all.
+        /// </summary>
+        private static int ImbalanceScanStart(int legStartBar, int breakBar)
+        {
+            var from = legStartBar + 1;
+            return from > breakBar ? breakBar : from;
+        }
+
+        /// <summary>
         /// True when the leg between the order-block candle and the break contains a
         /// 3-candle imbalance in the direction of the move — the footprint of real
-        /// displacement.
+        /// displacement. See <see cref="ImbalanceScanStart"/> for which windows count.
         /// </summary>
         private bool LegHasImbalance(int obBar, int breakBar, bool bullish)
         {
             var minGap = MinFvgTicks * InstrumentTickSize;
 
-            for (var b = obBar + 2; b <= breakBar; b++)
+            for (var b = ImbalanceScanStart(obBar, breakBar); b <= breakBar; b++)
             {
                 if (b - 2 < 0)
                     continue;
@@ -575,7 +682,7 @@ namespace ICTSMC
                     StartBar = bar - 1,
                     Top = c2.Low,
                     Bottom = c0.High
-                });
+                }, bar);
             }
             else if (c2.High < c0.Low && c0.Low - c2.High >= minSize)
             {
@@ -585,7 +692,7 @@ namespace ICTSMC
                     StartBar = bar - 1,
                     Top = c0.Low,
                     Bottom = c2.High
-                });
+                }, bar);
             }
         }
 
@@ -610,27 +717,56 @@ namespace ICTSMC
             return overlap / smaller;
         }
 
-        private void AddZone(Zone zone)
+        /// <summary>
+        /// Two zones of the same kind are duplicates when they cover substantially the same
+        /// territory AND are of comparable size.
+        ///
+        /// The size test matters because the overlap ratio is measured against the SMALLER
+        /// zone, so a tight gap fully contained inside a wide one always scored 1.0 and was
+        /// discarded. That is backwards: a narrow zone inside a broad one is the better
+        /// entry — a tighter stop off the same level — not a redundant copy of it.
+        /// </summary>
+        private static bool IsDuplicateZone(Zone candidate, Zone existing)
+        {
+            if (OverlapRatio(candidate, existing) < ZoneDuplicateOverlap)
+                return false;
+
+            var larger = Math.Max(candidate.Height, existing.Height);
+            if (larger <= 0m)
+                return true;
+
+            var smaller = Math.Min(candidate.Height, existing.Height);
+            return smaller / larger >= ZoneDuplicateSizeRatio;
+        }
+
+        /// <param name="bar">
+        /// The chart bar the zone became KNOWN at, which is not the bar its geometry starts
+        /// at — an HTF zone is anchored to the first chart bar of its own candle but cannot
+        /// be detected until that candle closes. Everything that asks "is this zone fresh?"
+        /// (the exit-warning radar, the journal timestamp) needs the former.
+        /// </param>
+        private void AddZone(Zone zone, int bar)
         {
             // Suppress only genuine duplicates — an active zone of the same kind
-            // covering substantially the same territory. Zones that merely graze each
-            // other are kept: stacked imbalances in one impulse leg are a stronger
-            // draw in ICT, not noise, and silently dropping them under-counted the
+            // covering substantially the same territory at a comparable size. Zones that
+            // merely graze each other are kept: stacked imbalances in one impulse leg are a
+            // stronger draw in ICT, not noise, and silently dropping them under-counted the
             // confluence stack the entry model reports.
             var duplicate = _zones.Any(z =>
                 z.State != ZoneState.Mitigated &&
                 z.Type == zone.Type &&
                 z.IsHtf == zone.IsHtf &&
                 z.HtfLabel == zone.HtfLabel &&
-                OverlapRatio(zone, z) >= ZoneDuplicateOverlap);
+                IsDuplicateZone(zone, z));
 
             if (duplicate)
                 return;
 
             zone.Id = ++_nextZoneId;
+            zone.CreatedBar = bar;
             _zones.Add(zone);
             OnZoneCreated(zone);
-            JournalEvent(_lastSeenBar, "ZoneCreated", zone.IsBullish ? "Bull" : "Bear", zone, 0m, "");
+            JournalEvent(bar, "ZoneCreated", zone.IsBullish ? "Bull" : "Bear", zone, 0m, "");
             MarkRenderDirty();
 
             var sameType = _zones.Where(z => z.Type == zone.Type && z.IsHtf == zone.IsHtf &&
@@ -754,7 +890,7 @@ namespace ICTSMC
         {
             foreach (var zone in flipped)
             {
-                AddZone(zone);
+                AddZone(zone, bar);
 
                 var isBreaker = zone.Type is ZoneType.BullBreaker or ZoneType.BearBreaker;
                 JournalEvent(bar, isBreaker ? "ZoneBroken" : "ZoneInverted", zone.IsBullish ? "Bull" : "Bear", zone, 0m,
@@ -763,10 +899,6 @@ namespace ICTSMC
                         : "FVG flipped polarity (body close through)") + layerNote);
             }
         }
-
-        /// <summary>How many chart candles make up one candle of this HTF layer.</summary>
-        private int BarsPerHtfCandle(HtfAggregator agg) =>
-            _chartMinutes > 0 ? Math.Max(1, agg.Minutes / _chartMinutes) : 1;
 
         /// <summary>
         /// Body-close pass for ONE higher-timeframe layer, run when that layer's candle
@@ -779,7 +911,15 @@ namespace ICTSMC
         /// flip the zone permanently. That is why an M15 chart showed 4H iFVGs a genuine
         /// H4 chart never produced.
         /// </summary>
-        private void ApplyHtfBodyClose(HtfAggregator agg)
+        /// <param name="chartBar">
+        /// The chart bar at which this layer's candle became known to be closed. Passing
+        /// <c>_lastSeenBar</c> instead was correct on the forward path and wrong during the
+        /// retro-feed, where the aggregators are replayed across the whole history while that
+        /// field sits at the configuration bar: every HTF zone mitigated in the replay was
+        /// stamped with EndBar = the present, so it rendered to the live edge and Prune never
+        /// retired it.
+        /// </param>
+        private void ApplyHtfBodyClose(HtfAggregator agg, int chartBar)
         {
             var n = agg.Candles.Count;
             if (n == 0)
@@ -807,10 +947,10 @@ namespace ICTSMC
                 if (zone.StartBar >= closed.FirstChartBar)
                     continue;
 
-                ApplyBodyCloseToZone(zone, bodyLow, bodyHigh, _lastSeenBar, flipFloorBar, flipped);
+                ApplyBodyCloseToZone(zone, bodyLow, bodyHigh, chartBar, flipFloorBar, flipped);
             }
 
-            CommitFlippedZones(flipped, _lastSeenBar, $" [{agg.Label} candle close]");
+            CommitFlippedZones(flipped, chartBar, $" [{agg.Label} candle close]");
         }
 
         /// <summary>
@@ -821,7 +961,7 @@ namespace ICTSMC
         {
             var minGap = MinFvgTicks * InstrumentTickSize;
 
-            for (var b = obIndex + 2; b <= lastIndex; b++)
+            for (var b = ImbalanceScanStart(obIndex, lastIndex); b <= lastIndex; b++)
             {
                 if (b - 2 < 0)
                     continue;
@@ -927,9 +1067,14 @@ namespace ICTSMC
             // 4H candle only closes every 16 bars. A filled 4H gap was therefore pruned
             // before its own layer's candle had a chance to close on it, so it could never
             // invert and 4H iFVGs simply never appeared.
+            // A zone an unresolved signal was built on is never pruned: Mitigate() matches
+            // open signals by TriggerZoneId, so dropping the zone silently disabled the
+            // "signal zone invalidated" alert for exactly the trade that needed it. Signals
+            // always resolve within SignalTimeoutBars, so this cannot accumulate.
             _zones.RemoveAll(z =>
                 z.State == ZoneState.Mitigated &&
-                bar - (z.EndBar ?? bar) > MitigatedRetentionBars(z));
+                bar - (z.EndBar ?? bar) > MitigatedRetentionBars(z) &&
+                !IsTriggerOfOpenSignal(z.Id));
 
             if (_structure.Count > 150)
                 _structure.RemoveRange(0, _structure.Count - 150);
@@ -944,6 +1089,64 @@ namespace ICTSMC
             // "keep swept levels visible" setting silently caps at KeepMitigatedBars.
             var sweptRetention = Math.Max(KeepMitigatedBars, SweptRetentionBars);
             _liquidity.RemoveAll(l => l.Swept && l.SweptBar.HasValue && bar - l.SweptBar.Value > sweptRetention);
+        }
+
+        private bool IsTriggerOfOpenSignal(int zoneId)
+        {
+            foreach (var s in _openSignals)
+            {
+                if (!s.Resolved && s.TriggerZoneId == zoneId)
+                    return true;
+            }
+
+            return false;
+        }
+
+        #endregion
+
+        #region Higher-timeframe bias
+
+        /// <summary>
+        /// Compact description of every configured layer's structural bias ("4H↑ D↓"),
+        /// recorded on every signal whether or not the bias filter is enabled — so its
+        /// predictive value is measurable from the journal before it is trusted to veto.
+        /// </summary>
+        private string HtfBiasText()
+        {
+            if (_htfAggregators.Count == 0)
+                return "n/a";
+
+            var parts = new List<string>(_htfAggregators.Count);
+            foreach (var agg in _htfAggregators)
+                parts.Add(agg.Label + agg.BiasGlyph);
+
+            return string.Join(" ", parts);
+        }
+
+        /// <summary>
+        /// True unless some configured HTF layer's own structure points against the trade.
+        /// Layers that have not yet established a bias are neutral and never veto.
+        /// </summary>
+        private bool HtfBiasAllows(bool longSide, out string opposing)
+        {
+            opposing = "";
+
+            if (_htfAggregators.Count == 0)
+                return true;
+
+            var want = longSide ? 1 : -1;
+
+            foreach (var agg in _htfAggregators)
+            {
+                var trend = agg.Structure.Trend;
+                if (trend != 0 && trend != want)
+                {
+                    opposing = $"{agg.Label} is {(trend == 1 ? "bullish" : "bearish")}";
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         #endregion
@@ -965,25 +1168,45 @@ namespace ICTSMC
         /// Once configured, the aggregators are retro-fed the full history so HTF
         /// zones exist from the very first chart bar.
         /// </summary>
+        /// <summary>
+        /// Measures the chart timeframe from the data. Runs on every bar-close regardless of
+        /// whether HTF mapping is enabled, because the result is needed for the alert
+        /// identity ("GC 1H"), the /shot chart names and the mitigated-zone retention maths —
+        /// none of which are HTF features.
+        /// </summary>
+        private void UpdateChartTimeframe(int bar)
+        {
+            if (_chartTfResolved)
+                return;
+
+            CollectBarDeltaSample(bar);
+
+            // Resolve once we have a solid sample — or at the end of a short history.
+            if (_barDeltaSamples.Count < 30 && bar < CurrentBar - 2)
+                return;
+
+            _chartMinutes = EstimateChartMinutes(out _chartTfRegular, out _chartTfApproxMinutes, out _chartTfSeconds);
+            _chartTfLabel = _chartTfRegular ? DurationToLabel(_chartTfSeconds) : MinutesToLabel(_chartMinutes);
+            _chartTfResolved = true;
+
+            // The measured chart TF doubles as the alert identity and registers this chart
+            // with the Telegram command hub (/shot).
+            TelegramHub.Register(this);
+        }
+
         private void UpdateHtf(int bar)
         {
-            if (!HtfEnabled)
+            if (!HtfEnabled || !_chartTfResolved)
                 return;
 
             if (!_htfConfigured)
             {
-                CollectBarDeltaSample(bar);
+                ConfigureHtfLayers();
+                _htfConfigured = true;
 
-                // Configure once we have a solid sample — or at the end of a short history.
-                if (_barDeltaSamples.Count >= 30 || bar >= CurrentBar - 2)
-                {
-                    ConfigureHtfLayers();
-                    _htfConfigured = true;
-
-                    for (var i = 1; i <= bar; i++)
-                        foreach (var agg in _htfAggregators)
-                            FeedAggregator(agg, i);
-                }
+                for (var i = 1; i <= bar; i++)
+                    foreach (var agg in _htfAggregators)
+                        FeedAggregator(agg, i);
 
                 return;
             }
@@ -1097,8 +1320,11 @@ namespace ICTSMC
         {
             _htfAggregators.Clear();
 
-            var chartMinutes = EstimateChartMinutes(out var regular, out var approx, out var chartSeconds);
-            _chartMinutes = chartMinutes;
+            // The chart timeframe is already measured by UpdateChartTimeframe.
+            var chartMinutes = _chartMinutes;
+            var regular = _chartTfRegular;
+            var approx = _chartTfApproxMinutes;
+            var chartSeconds = _chartTfSeconds;
             var layers = new List<int>();
 
             if (HtfMode == HtfSelectionMode.Manual)
@@ -1133,17 +1359,15 @@ namespace ICTSMC
                     ? _dailyAnchorInfo
                     : "day=calendar");
 
+            var weekNote = $"week={EffectiveWeeklyAnchorDay}" +
+                           (WeeklyAnchorMode == WeekAnchorMode.Manual ? " (manual)" : " (auto)");
+
             _htfInfo = HtfMode == HtfSelectionMode.Manual
-                ? $"HTF manual: {layerText} · chart {chartText} · {anchorNote}"
-                : $"HTF auto: {layerText} · chart {chartText} · {anchorNote}";
+                ? $"HTF manual: {layerText} · chart {chartText} · {anchorNote} · {weekNote}"
+                : $"HTF auto: {layerText} · chart {chartText} · {anchorNote} · {weekNote}";
 
             JournalEvent(_lastSeenBar, "SessionAnchor", "", null, 0m,
-                $"{anchorNote}; intraday anchor {IntradayAnchorMinutes}m; layers {layerText}");
-
-            // The measured chart TF doubles as the alert identity ("GC 1H") and
-            // registers this chart with the Telegram command hub (/shot).
-            _chartTfLabel = regular ? measured : MinutesToLabel(chartMinutes);
-            TelegramHub.Register(this);
+                $"{anchorNote}; {weekNote}; intraday anchor {IntradayAnchorMinutes}m; layers {layerText}");
         }
 
         /// <summary>
@@ -1164,6 +1388,18 @@ namespace ICTSMC
                 return _dailyAnchorResolved;
             }
         }
+
+        /// <summary>
+        /// The weekday the weekly bucket opens on.
+        ///
+        /// Auto infers it from whether the instrument has a session at all: a detected daily
+        /// session gap means a futures-style contract, whose week opens Sunday evening;
+        /// no gap means a 24/7 or cash instrument, which keeps the calendar (Monday) week.
+        /// </summary>
+        private DayOfWeek EffectiveWeeklyAnchorDay =>
+            WeeklyAnchorMode == WeekAnchorMode.Manual
+                ? WeeklyAnchorDay
+                : EffectiveDailyAnchorMinutes > 0 ? DayOfWeek.Sunday : DayOfWeek.Monday;
 
         /// <summary>
         /// Finds where the trading day starts by looking for the recurring gap in bar
@@ -1287,6 +1523,17 @@ namespace ICTSMC
         {
             var anchorMinutes = minutes >= 1440 ? EffectiveDailyAnchorMinutes : IntradayAnchorMinutes;
             var anchorTicks = TimeSpan.FromMinutes(anchorMinutes).Ticks;
+
+            // Weekly and larger buckets need a WEEKDAY phase as well as a minute-of-day one.
+            // .NET tick zero (0001-01-01) is a Monday, so without this the week always opened
+            // Monday at the daily anchor — which folded roughly an extra day of the current
+            // week into "last week" for any instrument whose week opens Sunday evening.
+            if (minutes >= 10080)
+            {
+                var dayOffset = ((int)EffectiveWeeklyAnchorDay - (int)DayOfWeek.Monday + 7) % 7;
+                anchorTicks += TimeSpan.FromDays(dayOffset).Ticks;
+            }
+
             var span = TimeSpan.FromMinutes(minutes).Ticks;
             var shifted = time.Ticks - anchorTicks;
 
@@ -1306,7 +1553,7 @@ namespace ICTSMC
                 if (agg.Current != null)
                 {
                     agg.Candles.Add(agg.Current);
-                    OnHtfCandleClosed(agg);
+                    OnHtfCandleClosed(agg, bar);
                 }
 
                 agg.Current = new HtfCandle
@@ -1327,10 +1574,58 @@ namespace ICTSMC
             }
 
             if (agg.Candles.Count > 400)
-                agg.Candles.RemoveRange(0, agg.Candles.Count - 400);
+            {
+                var removed = agg.Candles.Count - 400;
+                agg.Candles.RemoveRange(0, removed);
+                RebaseHtfSwings(agg.Structure, removed);
+            }
         }
 
-        private void OnHtfCandleClosed(HtfAggregator agg)
+        /// <summary>
+        /// Shifts this layer's stored swing pivots to follow a trim of its candle buffer.
+        ///
+        /// In the HTF path <see cref="SwingPoint.Bar"/> is an INDEX into
+        /// <see cref="HtfAggregator.Candles"/>, not an absolute bar number as it is on the
+        /// chart timeframe — so trimming the buffer silently invalidated every stored index.
+        /// The pivot de-duplication check then compared a fresh index against a stale one and
+        /// could suppress a genuine pivot or admit a duplicate. On a 15m layer the buffer
+        /// fills in roughly four days, so this was reached in normal use.
+        ///
+        /// Each SwingPoint is shifted exactly once even though LastHigh/LastLow usually alias
+        /// entries in the lists, and pivots whose candle is gone are dropped.
+        /// </summary>
+        private static void RebaseHtfSwings(HtfStructure st, int removed)
+        {
+            if (removed <= 0)
+                return;
+
+            var shifted = new HashSet<SwingPoint>();
+
+            ShiftAll(st.Highs, removed, shifted);
+            ShiftAll(st.Lows, removed, shifted);
+
+            if (st.LastHigh != null && shifted.Add(st.LastHigh))
+                st.LastHigh.Bar -= removed;
+
+            if (st.LastLow != null && shifted.Add(st.LastLow))
+                st.LastLow.Bar -= removed;
+
+            static void ShiftAll(List<SwingPoint> points, int removed, HashSet<SwingPoint> shifted)
+            {
+                for (var i = points.Count - 1; i >= 0; i--)
+                {
+                    var p = points[i];
+
+                    if (shifted.Add(p))
+                        p.Bar -= removed;
+
+                    if (p.Bar < 0)
+                        points.RemoveAt(i);
+                }
+            }
+        }
+
+        private void OnHtfCandleClosed(HtfAggregator agg, int chartBar)
         {
             var candles = agg.Candles;
             var n = candles.Count;
@@ -1338,7 +1633,7 @@ namespace ICTSMC
             // The order below mirrors OnBarComplete exactly - ATR, swings, structure
             // break (and the order block it produces), then fair value gaps, then
             // body-close settlement. Same rules, same sequence, different series.
-            UpdateHtfStructure(agg);
+            UpdateHtfStructure(agg, chartBar);
 
             if (HtfFvgEnabled && n >= 3)
             {
@@ -1365,7 +1660,7 @@ namespace ICTSMC
                         StartBar = c.FirstChartBar,
                         Top = b.Low,
                         Bottom = a.High
-                    });
+                    }, chartBar);
                 }
                 else if (b.High < a.Low && a.Low - b.High >= minSize)
                 {
@@ -1378,11 +1673,11 @@ namespace ICTSMC
                         StartBar = c.FirstChartBar,
                         Top = a.Low,
                         Bottom = b.High
-                    });
+                    }, chartBar);
                 }
             }
 
-            ApplyHtfBodyClose(agg);
+            ApplyHtfBodyClose(agg, chartBar);
         }
 
         /// <summary>
@@ -1401,7 +1696,7 @@ namespace ICTSMC
         /// beyond the protected swing, and CreateHtfOrderBlock's magnitude + imbalance
         /// proofs - just against this layer's candles and this layer's own state.
         /// </summary>
-        private void UpdateHtfStructure(HtfAggregator agg)
+        private void UpdateHtfStructure(HtfAggregator agg, int chartBar)
         {
             var c = agg.Candles;
             var n = c.Count;
@@ -1472,6 +1767,12 @@ namespace ICTSMC
             if (st.LastHigh is { Broken: false } && close > st.LastHigh.Price)
             {
                 st.LastHigh.Broken = true;
+
+                // This layer's own structural bias. It was previously computed implicitly and
+                // discarded, so the HTF engine could say a great deal about WHERE to trade
+                // and nothing at all about WHICH WAY.
+                st.Trend = 1;
+
                 if (UseProtectedSwings)
                 {
                     var low = st.Lows.LastOrDefault(l => !l.Broken);
@@ -1480,12 +1781,13 @@ namespace ICTSMC
                 }
 
                 if (HtfObEnabled)
-                    CreateHtfOrderBlock(agg, bar, bullish: true);
+                    CreateHtfOrderBlock(agg, bar, bullish: true, chartBar);
             }
-
-            if (st.LastLow is { Broken: false } && close < st.LastLow.Price)
+            else if (st.LastLow is { Broken: false } && close < st.LastLow.Price)
             {
                 st.LastLow.Broken = true;
+                st.Trend = -1;
+
                 if (UseProtectedSwings)
                 {
                     var high = st.Highs.LastOrDefault(h => !h.Broken);
@@ -1494,7 +1796,7 @@ namespace ICTSMC
                 }
 
                 if (HtfObEnabled)
-                    CreateHtfOrderBlock(agg, bar, bullish: false);
+                    CreateHtfOrderBlock(agg, bar, bullish: false, chartBar);
             }
 
             if (st.Highs.Count > 300)
@@ -1508,7 +1810,7 @@ namespace ICTSMC
         /// break, magnitude against THIS layer's ATR, velocity proved by an imbalance in
         /// the leg. Same three conditions, same lookback setting, same zone construction.
         /// </summary>
-        private void CreateHtfOrderBlock(HtfAggregator agg, int breakBar, bool bullish)
+        private void CreateHtfOrderBlock(HtfAggregator agg, int breakBar, bool bullish, int chartBar)
         {
             var c = agg.Candles;
             var st = agg.Structure;
@@ -1537,7 +1839,7 @@ namespace ICTSMC
                     StartBar = cand.FirstChartBar,
                     Top = ObStyle == ObZoneStyle.Body ? Math.Max(cand.Open, cand.Close) : cand.High,
                     Bottom = ObStyle == ObZoneStyle.Body ? Math.Min(cand.Open, cand.Close) : cand.Low
-                });
+                }, chartBar);
                 return;
             }
         }

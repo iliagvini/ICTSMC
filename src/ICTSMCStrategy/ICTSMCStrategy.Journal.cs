@@ -98,7 +98,7 @@ namespace ICTSMC
         private const string EventsHeader =
             "Time,Mode,Instrument,Event,Direction,ZoneId,ZoneTag,Layer,Top,Bottom,Price,Extra";
         private const string SignalsHeader =
-            "SignalId,Time,Mode,Instrument,Direction,Tier,ArmSource,TriggerTag,Layer,ZoneTop,ZoneBottom,Entry,SL,TP2,TP3,PdStatus,Confluence";
+            "SignalId,Time,Mode,Instrument,Direction,Tier,ArmSource,TriggerTag,Layer,ZoneTop,ZoneBottom,Entry,SL,TP2,TP3,PdStatus,HtfBias,Sequenced,Confluence";
         private const string OutcomesHeader =
             "SignalId,ResolvedTime,Mode,Outcome,ExitPrice,RMultiple,BE1R_R,Partial2R_R,MAE_R,MFE_R,BarsHeld,Direction,Tier,ArmSource,TriggerTag,Layer";
 
@@ -121,6 +121,8 @@ namespace ICTSMC
             _analyticsTrimmed = 0;
             _kzRejectBullBar = -1;
             _kzRejectBearBar = -1;
+            _htfBiasRejectBullBar = -1;
+            _htfBiasRejectBearBar = -1;
             _journalInstanceId ??= Guid.NewGuid().ToString("N")[..4];
             _sessionStamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture)
                             + "-" + _journalInstanceId;
@@ -228,6 +230,27 @@ namespace ICTSMC
             }
         }
 
+        /// <summary>
+        /// Waits, up to <paramref name="timeout"/>, for everything already queued on the IO
+        /// chain to reach disk. Used on teardown: an audit trail that loses its final rows
+        /// because the process moved on is worth a bounded pause to avoid.
+        /// </summary>
+        private void DrainJournalIo(TimeSpan timeout)
+        {
+            Task pending;
+            lock (_ioChainLock)
+                pending = _ioChain;
+
+            try
+            {
+                pending?.Wait(timeout);
+            }
+            catch
+            {
+                // Individual writes already swallow their own failures; nothing to add.
+            }
+        }
+
         /// <summary>Flush any batched historical rows (called when a bar completes).</summary>
         private void FlushJournalBuffers()
         {
@@ -261,8 +284,25 @@ namespace ICTSMC
             if (!JournalEnabled)
                 return;
 
+            JournalEventAt(BarTime(bar), evt, direction, zone, price, extra);
+        }
+
+        /// <summary>
+        /// Journals an event at an already-resolved timestamp.
+        ///
+        /// This overload touches no ATAS series member, so it is safe to call from a
+        /// background thread — which the Telegram delivery chain needs in order to report a
+        /// failed send. Callers on such threads must resolve the timestamp with
+        /// <see cref="BarTime"/> on the chart thread first and must not pass a live
+        /// <see cref="Zone"/>.
+        /// </summary>
+        private void JournalEventAt(DateTime time, string evt, string direction, Zone zone, decimal price, string extra)
+        {
+            if (!JournalEnabled)
+                return;
+
             var line = string.Join(",",
-                BarTime(bar).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                time.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
                 _realtime ? "LIVE" : "HIST",
                 Csv(InstrumentInfo?.Instrument ?? ""),
                 evt,
@@ -306,6 +346,11 @@ namespace ICTSMC
                 Num(record.Tp2),
                 Num(record.Tp3),
                 record.PdStatus,
+                Csv(record.HtfBias),
+                // Intrabar ordering is only knowable on a live bar. HIST rows resolve the
+                // signal bar conservatively (whole-bar exposure, stop first) — flagged here
+                // so the two modes are never silently averaged together.
+                record.IntrabarSequenced ? "intrabar" : "bar-conservative",
                 Csv(record.Confluence));
 
             JournalWrite("signals.csv", SignalsHeader, line);
@@ -528,9 +573,13 @@ namespace ICTSMC
 
                 if (!s.WarnedZone)
                 {
+                    // Freshness is asked of CreatedBar, not StartBar. An HTF zone's geometry
+                    // is anchored to the first chart bar of its own candle — up to a full HTF
+                    // candle before it could be detected — so a StartBar test could never
+                    // match one, and the threat class most worth warning about was invisible.
                     var opp = _zones.LastOrDefault(z =>
                         z.State != ZoneState.Mitigated &&
-                        z.StartBar >= bar - 1 &&
+                        z.CreatedBar >= bar - 1 &&
                         z.Id != s.TriggerZoneId &&
                         z.IsBullish != s.Long);
                     if (opp != null)

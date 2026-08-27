@@ -50,6 +50,14 @@ namespace ICTSMC
             return pen;
         }
 
+        /// <summary>
+        /// Drops the cached pens on teardown. RenderPen holds no unmanaged handle of its own
+        /// (it is not IDisposable), so this only releases the references — but the cache is
+        /// keyed per colour/width/dash and lives as long as the indicator, and until now the
+        /// indicator had no teardown path at all.
+        /// </summary>
+        private void DisposePenCache() => _penCache.Clear();
+
         protected override void OnRender(RenderContext context, DrawingLayouts layout)
         {
             if (ChartInfo == null || InstrumentInfo == null || CurrentBar < 2)
@@ -282,9 +290,6 @@ namespace ICTSMC
             ZoneType.BearBreaker => BearBreakerColor,
             _ => BearIfvgColor
         };
-
-        /// <summary>Overload for callers that hold a live Zone (the /shot snapshot renderer).</summary>
-        private Color ZoneColor(Zone zone) => ZoneColor(zone.Type);
 
         #endregion
 

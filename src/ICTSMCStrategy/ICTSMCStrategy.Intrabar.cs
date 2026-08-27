@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace ICTSMC
@@ -14,9 +15,19 @@ namespace ICTSMC
             Timeout = TimeSpan.FromSeconds(10)
         };
 
-        // Killzone rejections are journaled at most once per bar per side.
+        // Killzone and HTF-bias rejections are journaled at most once per bar per side.
         private int _kzRejectBullBar = -1;
         private int _kzRejectBearBar = -1;
+        private int _htfBiasRejectBullBar = -1;
+        private int _htfBiasRejectBearBar = -1;
+
+        // Serialized, rate-limited Telegram delivery. Ordering matters (an exit warning must
+        // not overtake the entry it refers to) and so does spacing (Telegram throttles a
+        // group at roughly 20 messages/minute and answers 429 beyond that).
+        private Task _telegramChain = Task.CompletedTask;
+        private readonly object _telegramChainLock = new();
+        private DateTime _telegramNextSlot = DateTime.MinValue;
+        private static readonly TimeSpan TelegramMinGap = TimeSpan.FromMilliseconds(1100);
 
         #region Zone contact geometry
 
@@ -36,14 +47,26 @@ namespace ICTSMC
             low <= zone.Top && high >= zone.Bottom;
 
         /// <summary>
-        /// True when price actually traded THROUGH the zone's proximal edge on this
-        /// bar — the edge the trade plan quotes as its entry. This is stricter than
-        /// mere contact and is what an entry signal requires: it proves price returned
-        /// into the zone from the correct side rather than being parked beyond it.
+        /// True when price returned into the zone THROUGH its proximal edge on this bar,
+        /// approaching from outside — the edge the trade plan quotes as its entry.
+        ///
+        /// The straddle test this replaces (`high >= Top && low <= Top` for a bullish zone)
+        /// asked only whether the bar had touched both sides of the edge, which is equally
+        /// true of price LEAVING the zone upward. That mattered in a common shape: the model
+        /// arms on an MSS while price already sits inside a bullish zone — an MSS frequently
+        /// prints on exactly that retest — and the next bar pokes above the top. A LONG then
+        /// fired quoting the zone top as its entry while the market traded above it, and
+        /// because the trigger is chosen as the highest top on the assumption of a falling
+        /// tap, it picked the zone furthest from price. Entry and stop were both stale.
+        ///
+        /// Requiring the bar to OPEN at or outside the edge establishes the direction of
+        /// approach, and makes the trigger-selection assumption true by construction. The
+        /// high/low terms of the old test are implied by it and are no longer needed
+        /// (for a long, open >= Top already guarantees high >= Top).
         /// </summary>
-        private static bool EntryEdgeTraded(Zone zone, decimal high, decimal low) => zone.IsBullish
-            ? high >= zone.Top && low <= zone.Top
-            : low <= zone.Bottom && high >= zone.Bottom;
+        private static bool EntryEdgeTraded(Zone zone, decimal open, decimal high, decimal low) => zone.IsBullish
+            ? open >= zone.Top && low <= zone.Top
+            : open <= zone.Bottom && high >= zone.Bottom;
 
         #endregion
 
@@ -80,15 +103,29 @@ namespace ICTSMC
 
                 // Entry-model precursor: taking sell-side liquidity primes LONGS,
                 // taking buy-side liquidity primes SHORTS.
+                //
+                // When several levels go on ONE bar, keep the most EXTREME one taken rather
+                // than whichever happened to be iterated last. Only the retained level is
+                // asked whether it was a trap or a run, and _liquidity is in insertion order,
+                // so the previous behaviour let a List<T>'s ordering decide whether the model
+                // armed at all. The furthest level reached is the meaningful stop-run.
                 if (level.BuySide)
                 {
-                    _pendingBearSweepBar = bar;
-                    _pendingBearSweepLevel = level;
+                    if (_pendingBearSweepBar != bar || _pendingBearSweepLevel == null ||
+                        level.Price > _pendingBearSweepLevel.Price)
+                    {
+                        _pendingBearSweepBar = bar;
+                        _pendingBearSweepLevel = level;
+                    }
                 }
                 else
                 {
-                    _pendingBullSweepBar = bar;
-                    _pendingBullSweepLevel = level;
+                    if (_pendingBullSweepBar != bar || _pendingBullSweepLevel == null ||
+                        level.Price < _pendingBullSweepLevel.Price)
+                    {
+                        _pendingBullSweepBar = bar;
+                        _pendingBullSweepLevel = level;
+                    }
                 }
 
                 JournalEvent(bar, "LiquiditySweep", level.BuySide ? "BuySide" : "SellSide", null, level.Price,
@@ -111,6 +148,15 @@ namespace ICTSMC
         {
             var candle = GetCandle(bar);
 
+            // Continuation candidates are collected here and emitted only after the whole
+            // pass — including this bar's mitigation — has run. Emitting inline meant a
+            // C-tier long could be printed off a bullish FVG that the very same bar traded
+            // clean through (FullFill is the shipped FVG rule), and because Mitigate() alerts
+            // on any open signal whose trigger zone died, the user received the C-tier entry
+            // and its own invalidation milliseconds apart from a single tick. The armed A/B
+            // path never had this problem, because TickEntryModel runs after mitigation.
+            List<Zone> continuationCandidates = null;
+
             foreach (var zone in _zones)
             {
                 if (zone.State == ZoneState.Mitigated || zone.StartBar >= bar)
@@ -126,13 +172,19 @@ namespace ICTSMC
                     // a full untouched bar in between separates two.
                     var isRetouch = zone.LastTouchedBar >= 0 && bar > zone.LastTouchedBar + 1;
                     zone.LastTouchedBar = bar;
-                    MarkRenderDirty();
 
                     if (zone.State == ZoneState.Active)
                     {
                         zone.State = ZoneState.Touched;
                         zone.TouchEpisodes = 1;
-                        TryEmitContinuationSignal(zone, bar);
+
+                        // Only a STATE change is visible to the renderer (it drives the zone's
+                        // fill alpha). Marking dirty on every tick of mere contact rebuilt the
+                        // entire snapshot — up to a few hundred ZoneViews plus three list
+                        // allocations — on the data thread, per tick, for an identical result.
+                        MarkRenderDirty();
+
+                        (continuationCandidates ??= new List<Zone>()).Add(zone);
                     }
                     else if (isRetouch && zone.State == ZoneState.Touched)
                     {
@@ -193,6 +245,14 @@ namespace ICTSMC
                     // BodyClose is handled on finalized candles in ApplyBodyCloseMitigation.
                 }
             }
+
+            if (continuationCandidates == null)
+                return;
+
+            // Mitigation for this bar has now been applied, so a zone that died on the same
+            // tick it was first touched can no longer produce a signal.
+            foreach (var zone in continuationCandidates)
+                TryEmitContinuationSignal(zone, bar);
         }
 
         #endregion
@@ -475,31 +535,36 @@ namespace ICTSMC
                         ZoneInContact(z, candle.High, candle.Low)).ToList();
 
                     var touched = candidates
-                        .Where(z => EntryEdgeTraded(z, candle.High, candle.Low))
+                        .Where(z => EntryEdgeTraded(z, candle.Open, candle.High, candle.Low))
                         .ToList();
 
-                    // In contact but the proximal edge never traded this bar: price was
-                    // already inside or beyond the zone when the model armed, so quoting
+                    // In contact but price never crossed in through the proximal edge this
+                    // bar: it was already inside, or beyond, or leaving the zone — so quoting
                     // that edge as the entry would put the plan on the wrong side of the
                     // market. The setup is not consumed — it can still fire on a clean
                     // re-entry — but the suppression is journaled, never silent.
-                    foreach (var z in candidates.Where(z => !z.EdgeRejectLogged && !touched.Contains(z)))
+                    foreach (var z in candidates.Where(z => z.EdgeRejectEpisode != z.TouchEpisodes && !touched.Contains(z)))
                     {
-                        z.EdgeRejectLogged = true;
+                        z.EdgeRejectEpisode = z.TouchEpisodes;
                         JournalEvent(bar, "EntryRejected", "Bull", z, candle.Close,
-                            $"contact without an edge cross: entry {FormatPrice(z.Top)} was not traded on this bar " +
-                            "(price already inside/beyond the zone when armed); setup stays armed");
+                            $"no approach from outside the entry edge: bar opened {FormatPrice(candle.Open)} " +
+                            $"below entry {FormatPrice(z.Top)} (price already inside/beyond the zone, or leaving it); " +
+                            "setup stays armed");
                     }
 
                     var matches = touched.Where(z => PdAligned(z, true, eq, tolerance)).ToList();
 
-                    // Zones the PD filter vetoed — logged once per zone with the exact
-                    // numbers, so every filtered entry can be audited and back-scored.
+                    // Zones the PD filter vetoed — logged once per touch episode with the
+                    // exact numbers, so every filtered entry can be audited and back-scored.
+                    // Per EPISODE rather than once forever: equilibrium moves as the leg
+                    // extends, so the same zone can legitimately be vetoed on one
+                    // presentation and accepted on the next, and a permanent latch left that
+                    // change of verdict unexplained in the log.
                     if (EntryNeedsPdAlignment && eq != null)
                     {
-                        foreach (var z in touched.Where(z => z.Mid > eq.Value + tolerance && !z.PdRejectLogged))
+                        foreach (var z in touched.Where(z => z.Mid > eq.Value + tolerance && z.PdRejectEpisode != z.TouchEpisodes))
                         {
-                            z.PdRejectLogged = true;
+                            z.PdRejectEpisode = z.TouchEpisodes;
                             JournalEvent(bar, "EntryRejected", "Bull", z, candle.Close,
                                 $"PD filter: zone mid {FormatPrice(z.Mid)} > limit {FormatPrice(eq.Value + tolerance)} " +
                                 $"(EQ {FormatPrice(eq.Value)} + tol {FormatPrice(tolerance)}); excess {FormatPrice(z.Mid - eq.Value - tolerance)}; " +
@@ -508,6 +573,10 @@ namespace ICTSMC
                     }
 
                     matches = FilterByOte(matches, true, bar, candle.Close);
+                    matches = FilterByRisk(matches, true, bar, candle.Close);
+
+                    if (matches.Count > 0 && !HtfBiasPermits(true, null, bar, candle.Close))
+                        matches.Clear();
 
                     if (matches.Count > 0)
                     {
@@ -543,29 +612,30 @@ namespace ICTSMC
                         ZoneInContact(z, candle.High, candle.Low)).ToList();
 
                     var touched = candidates
-                        .Where(z => EntryEdgeTraded(z, candle.High, candle.Low))
+                        .Where(z => EntryEdgeTraded(z, candle.Open, candle.High, candle.Low))
                         .ToList();
 
-                    // In contact but the proximal edge never traded this bar: price was
-                    // already inside or beyond the zone when the model armed, so quoting
+                    // In contact but price never crossed in through the proximal edge this
+                    // bar: it was already inside, or beyond, or leaving the zone — so quoting
                     // that edge as the entry would put the plan on the wrong side of the
                     // market. The setup is not consumed — it can still fire on a clean
                     // re-entry — but the suppression is journaled, never silent.
-                    foreach (var z in candidates.Where(z => !z.EdgeRejectLogged && !touched.Contains(z)))
+                    foreach (var z in candidates.Where(z => z.EdgeRejectEpisode != z.TouchEpisodes && !touched.Contains(z)))
                     {
-                        z.EdgeRejectLogged = true;
+                        z.EdgeRejectEpisode = z.TouchEpisodes;
                         JournalEvent(bar, "EntryRejected", "Bear", z, candle.Close,
-                            $"contact without an edge cross: entry {FormatPrice(z.Bottom)} was not traded on this bar " +
-                            "(price already inside/beyond the zone when armed); setup stays armed");
+                            $"no approach from outside the entry edge: bar opened {FormatPrice(candle.Open)} " +
+                            $"above entry {FormatPrice(z.Bottom)} (price already inside/beyond the zone, or leaving it); " +
+                            "setup stays armed");
                     }
 
                     var matches = touched.Where(z => PdAligned(z, false, eq, tolerance)).ToList();
 
                     if (EntryNeedsPdAlignment && eq != null)
                     {
-                        foreach (var z in touched.Where(z => z.Mid < eq.Value - tolerance && !z.PdRejectLogged))
+                        foreach (var z in touched.Where(z => z.Mid < eq.Value - tolerance && z.PdRejectEpisode != z.TouchEpisodes))
                         {
-                            z.PdRejectLogged = true;
+                            z.PdRejectEpisode = z.TouchEpisodes;
                             JournalEvent(bar, "EntryRejected", "Bear", z, candle.Close,
                                 $"PD filter: zone mid {FormatPrice(z.Mid)} < limit {FormatPrice(eq.Value - tolerance)} " +
                                 $"(EQ {FormatPrice(eq.Value)} - tol {FormatPrice(tolerance)}); shortfall {FormatPrice(eq.Value - tolerance - z.Mid)}; " +
@@ -574,6 +644,10 @@ namespace ICTSMC
                     }
 
                     matches = FilterByOte(matches, false, bar, candle.Close);
+                    matches = FilterByRisk(matches, false, bar, candle.Close);
+
+                    if (matches.Count > 0 && !HtfBiasPermits(false, null, bar, candle.Close))
+                        matches.Clear();
 
                     if (matches.Count > 0)
                     {
@@ -626,9 +700,9 @@ namespace ICTSMC
                     continue;
                 }
 
-                if (!z.OteRejectLogged)
+                if (z.OteRejectEpisode != z.TouchEpisodes)
                 {
-                    z.OteRejectLogged = true;
+                    z.OteRejectEpisode = z.TouchEpisodes;
                     JournalEvent(bar, "EntryRejected", longSide ? "Bull" : "Bear", z, close,
                         $"OTE filter: zone mid {FormatPrice(z.Mid)} outside " +
                         $"{FormatPrice(band.Value.Bottom)}–{FormatPrice(band.Value.Top)} " +
@@ -637,6 +711,94 @@ namespace ICTSMC
             }
 
             return kept;
+        }
+
+        /// <summary>
+        /// Rejects plans whose stop distance is unusable in either direction.
+        ///
+        /// Risk here is entirely the trigger zone's height plus the buffer, and zone heights
+        /// span three orders of magnitude between a 2-tick imbalance and a Daily order block.
+        /// At the bottom the stop sits inside the spread; at the top 3R cannot be reached
+        /// before the signal times out, so the trade resolves by clock rather than outcome.
+        /// Both filters ship off (0 = disabled); when on, the veto is journaled with numbers.
+        /// </summary>
+        /// <summary>
+        /// Drops zones whose resulting plan has an unusable stop distance. Applied as a
+        /// FILTER over the candidate zones rather than as a veto after the trigger is
+        /// chosen, so — like the PD and OTE filters — a rejection never consumes the armed
+        /// setup: another zone touched later in the window can still fire.
+        /// </summary>
+        private List<Zone> FilterByRisk(List<Zone> matches, bool longSide, int bar, decimal close)
+        {
+            if (matches.Count == 0 || (MinRiskTicks <= 0 && MaxRiskAtr <= 0m))
+                return matches;
+
+            var buffer = SlBufferTicks * InstrumentTickSize;
+            var kept = new List<Zone>(matches.Count);
+
+            foreach (var z in matches)
+            {
+                var risk = z.Height + buffer;
+                if (RiskWithinBounds(risk, longSide ? "Bull" : "Bear", z, bar, close))
+                    kept.Add(z);
+            }
+
+            return kept;
+        }
+
+        private bool RiskWithinBounds(decimal risk, string direction, Zone trigger, int bar, decimal close)
+        {
+            if (MinRiskTicks > 0)
+            {
+                var floor = MinRiskTicks * InstrumentTickSize;
+                if (risk < floor)
+                {
+                    JournalEvent(bar, "EntryRejected", direction, trigger, close,
+                        $"risk filter: stop distance {Num(risk)} below the {MinRiskTicks}-tick floor " +
+                        $"({Num(floor)}) — inside noise/spread for this instrument");
+                    return false;
+                }
+            }
+
+            if (MaxRiskAtr > 0m && _atr > 0m)
+            {
+                var ceiling = _atr * MaxRiskAtr;
+                if (risk > ceiling)
+                {
+                    JournalEvent(bar, "EntryRejected", direction, trigger, close,
+                        $"risk filter: stop distance {Num(risk)} above the ATR×{MaxRiskAtr} ceiling " +
+                        $"({Num(ceiling)}) — 3R is unreachable inside the {SignalTimeoutBars}-bar timeout");
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Optional higher-timeframe bias gate. The bias itself is always recorded on the
+        /// signal; this only decides whether an opposing layer may veto the trade.
+        /// </summary>
+        private bool HtfBiasPermits(bool longSide, Zone trigger, int bar, decimal close)
+        {
+            if (!HtfBiasFilterEnabled)
+                return true;
+
+            if (HtfBiasAllows(longSide, out var opposing))
+                return true;
+
+            // Journaled at most once per bar per side: the check runs on every tick the
+            // model is armed and in contact, and the verdict cannot change within a bar.
+            ref var latch = ref longSide ? ref _htfBiasRejectBullBar : ref _htfBiasRejectBearBar;
+            if (latch != bar)
+            {
+                latch = bar;
+                JournalEvent(bar, "EntryRejected", longSide ? "Bull" : "Bear", trigger, close,
+                    $"HTF bias filter: {opposing}, against this {(longSide ? "long" : "short")}; " +
+                    $"bias stack {HtfBiasText()}");
+            }
+
+            return false;
         }
 
         private void EmitEntrySignal(List<Zone> matches, bool longSide, decimal? eq, decimal tolerance, string armSource, int bar)
@@ -710,10 +872,12 @@ namespace ICTSMC
                 Tp3 = tp3,
                 PdStatus = pdStatus,
                 Confluence = confluence,
+                HtfBias = HtfBiasText(),
                 SignalBar = bar,
                 TriggerZoneId = trigger.Id,
-                HighAtSignal = candle.High,
-                LowAtSignal = candle.Low
+                IntrabarSequenced = _realtime,
+                HighAtSignal = _realtime ? candle.High : entry,
+                LowAtSignal = _realtime ? candle.Low : entry
             };
 
             JournalSignal(record);
@@ -724,6 +888,7 @@ namespace ICTSMC
             Fire($"{mark} {dir} ENTRY — {tierName} setup\n" +
                  $"📍 Zone: {trigger.Tag} {FormatPrice(trigger.Bottom)}–{FormatPrice(trigger.Top)}\n" +
                  $"🧩 Confluence: {confluence}\n" +
+                 $"🧭 HTF bias: {record.HtfBias}\n" +
                  $"⚖️ Range position: {pdStatus}\n" +
                  $"▶️ Entry: ~{FormatPrice(entry)}\n" +
                  $"🛑 Stop: {FormatPrice(sl)}\n" +
@@ -743,7 +908,10 @@ namespace ICTSMC
         /// </summary>
         private void TryEmitContinuationSignal(Zone zone, int bar)
         {
-            if (!EntryModelEnabled || !ContinuationSignalsEnabled || zone.ContinuationFired)
+            // State is re-checked here because the emit is deferred until after this bar's
+            // mitigation pass: a zone first touched and consumed on the same bar is dead.
+            if (!EntryModelEnabled || !ContinuationSignalsEnabled || zone.ContinuationFired ||
+                zone.State == ZoneState.Mitigated)
                 return;
 
             var longSide = zone.IsBullish;
@@ -758,10 +926,10 @@ namespace ICTSMC
 
             var candle = GetCandle(bar);
 
-            // Same contact discipline as the core model: the quoted entry edge must
-            // actually have traded on this bar, so a C-tier plan can never be printed
-            // with its entry sitting on the wrong side of the market.
-            if (!EntryEdgeTraded(zone, candle.High, candle.Low))
+            // Same contact discipline as the core model: price must have returned into the
+            // zone through the quoted entry edge, approaching from outside, so a C-tier plan
+            // can never be printed with its entry sitting on the wrong side of the market.
+            if (!EntryEdgeTraded(zone, candle.Open, candle.High, candle.Low))
                 return;
 
             if (!InKillzone(bar))
@@ -783,8 +951,6 @@ namespace ICTSMC
             if (armed && pdOk)
                 return;
 
-            zone.ContinuationFired = true;
-
             var reason = armed
                 ? $"PD override: zone mid {FormatPrice(zone.Mid)} beyond EQ limit"
                 : "no sweep→MSS chain";
@@ -793,6 +959,17 @@ namespace ICTSMC
             var entry = longSide ? zone.Top : zone.Bottom;
             var sl = longSide ? zone.Bottom - buffer : zone.Top + buffer;
             var risk = Math.Abs(entry - sl);
+
+            // Same gates as the core model. A rejected plan does NOT burn the one-shot latch:
+            // the zone was never presented as a signal, so it stays eligible.
+            if (!RiskWithinBounds(risk, longSide ? "Bull" : "Bear", zone, bar, candle.Close))
+                return;
+
+            if (!HtfBiasPermits(longSide, zone, bar, candle.Close))
+                return;
+
+            zone.ContinuationFired = true;
+
             var tp2 = longSide ? entry + risk * 2 : entry - risk * 2;
             var tp3 = longSide ? entry + risk * 3 : entry - risk * 3;
 
@@ -823,10 +1000,12 @@ namespace ICTSMC
                 Tp3 = tp3,
                 PdStatus = pdStatus,
                 Confluence = $"Non-ICT concept · momentum continuation · {reason}",
+                HtfBias = HtfBiasText(),
                 SignalBar = bar,
                 TriggerZoneId = zone.Id,
-                HighAtSignal = candle.High,
-                LowAtSignal = candle.Low
+                IntrabarSequenced = _realtime,
+                HighAtSignal = _realtime ? candle.High : entry,
+                LowAtSignal = _realtime ? candle.Low : entry
             };
 
             JournalSignal(record);
@@ -993,12 +1172,70 @@ namespace ICTSMC
 
             var html = sb.ToString();
 
-            _ = Task.Run(async () =>
+            // The headline is enough to identify which alert failed, without copying the
+            // whole card into the journal.
+            var headline = lines[0];
+
+            // Resolved HERE, on the chart thread: the delivery task must never call
+            // GetCandle or any other ATAS series member from a background thread.
+            var stamp = BarTime(_lastSeenBar);
+
+            EnqueueTelegram(() => DeliverTelegramAsync(token, chatId, html, headline, stamp));
+        }
+
+        /// <summary>
+        /// Serializes Telegram deliveries into a FIFO chain, exactly as the journal does for
+        /// its file writes and for the same reason: independent fire-and-forget tasks let
+        /// alerts overtake each other, so a burst could deliver an exit warning before the
+        /// entry it refers to.
+        /// </summary>
+        private void EnqueueTelegram(Func<Task> work)
+        {
+            lock (_telegramChainLock)
             {
+                _telegramChain = _telegramChain.ContinueWith(
+                    async _ =>
+                    {
+                        try
+                        {
+                            await work().ConfigureAwait(false);
+                        }
+                        catch
+                        {
+                            // Delivery is best-effort; the chain must survive any single failure.
+                        }
+                    },
+                    CancellationToken.None,
+                    TaskContinuationOptions.None,
+                    TaskScheduler.Default).Unwrap();
+            }
+        }
+
+        /// <summary>
+        /// Sends one message, spaced against the previous one and retried once on a 429.
+        ///
+        /// Telegram allows roughly 30 messages/second globally and about 20/minute into a
+        /// single group, and answers 429 with a retry_after beyond that. The previous code
+        /// discarded the response entirely (`_ = response.IsSuccessStatusCode`), so a
+        /// throttled or rejected alert was indistinguishable from a delivered one — on the
+        /// channel that is enabled by default, while the popup channel that is off by default
+        /// journaled its failures in full. Failures are now journaled with the status code.
+        /// </summary>
+        private async Task DeliverTelegramAsync(string token, string chatId, string html, string headline, DateTime stamp)
+        {
+            var url = $"https://api.telegram.org/bot{token}/sendMessage";
+
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                var wait = _telegramNextSlot - DateTime.UtcNow;
+                if (wait > TimeSpan.Zero)
+                    await Task.Delay(wait).ConfigureAwait(false);
+
+                _telegramNextSlot = DateTime.UtcNow + TelegramMinGap;
+
                 try
                 {
-                    var url = $"https://api.telegram.org/bot{token}/sendMessage";
-                    var payload = new FormUrlEncodedContent(new[]
+                    using var payload = new FormUrlEncodedContent(new[]
                     {
                         new KeyValuePair<string, string>("chat_id", chatId),
                         new KeyValuePair<string, string>("text", html),
@@ -1007,13 +1244,71 @@ namespace ICTSMC
                     });
 
                     using var response = await Http.PostAsync(url, payload).ConfigureAwait(false);
-                    _ = response.IsSuccessStatusCode;
+
+                    if (response.IsSuccessStatusCode)
+                        return;
+
+                    var status = (int)response.StatusCode;
+                    var body = await ReadBodyAsync(response).ConfigureAwait(false);
+
+                    if (status == 429 && attempt == 0)
+                    {
+                        // Honour Telegram's own back-off before the single retry.
+                        _telegramNextSlot = DateTime.UtcNow + TimeSpan.FromSeconds(RetryAfterSeconds(body));
+                        continue;
+                    }
+
+                    JournalEventAt(stamp, "AlertFailed", "", null, 0m,
+                        $"Telegram sendMessage returned {status}; alert \"{headline}\" was NOT delivered; {body}");
+                    return;
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Network hiccups must never crash the chart thread.
+                    JournalEventAt(stamp, "AlertFailed", "", null, 0m,
+                        $"Telegram sendMessage threw {ex.GetType().Name}: {ex.Message}; alert \"{headline}\" was NOT delivered");
+                    return;
                 }
-            });
+            }
+        }
+
+        private static async Task<string> ReadBodyAsync(HttpResponseMessage response)
+        {
+            try
+            {
+                var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                body = body.Replace('\n', ' ').Replace('\r', ' ').Trim();
+                return body.Length > 300 ? body.Substring(0, 300) : body;
+            }
+            catch
+            {
+                return "(response body unavailable)";
+            }
+        }
+
+        /// <summary>Pulls Telegram's <c>parameters.retry_after</c> out of a 429 body.</summary>
+        private static int RetryAfterSeconds(string body)
+        {
+            const int fallback = 5;
+
+            try
+            {
+                var marker = "\"retry_after\":";
+                var i = body.IndexOf(marker, StringComparison.Ordinal);
+                if (i < 0)
+                    return fallback;
+
+                var digits = new string(body.Substring(i + marker.Length).TrimStart()
+                    .TakeWhile(char.IsDigit).ToArray());
+
+                return int.TryParse(digits, NumberStyles.Integer, CultureInfo.InvariantCulture, out var seconds)
+                       && seconds > 0 && seconds <= 120
+                    ? seconds
+                    : fallback;
+            }
+            catch
+            {
+                return fallback;
+            }
         }
 
         #endregion

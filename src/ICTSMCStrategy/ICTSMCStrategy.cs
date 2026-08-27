@@ -58,9 +58,21 @@ namespace ICTSMC
         private readonly List<long> _barDeltaSamples = new();
         private bool _htfConfigured;
         private string _htfInfo = "";
+
+        // Chart-timeframe measurement. This is deliberately INDEPENDENT of the HTF
+        // subsystem: the chart's own timeframe is a property of the chart, not of a
+        // feature. Deriving it inside ConfigureHtfLayers meant that turning HTF mapping
+        // off stripped the timeframe out of every alert identity ("GC" instead of
+        // "GC 1H") and out of the /shot chart names — the exact disambiguation
+        // multi-chart setups depend on — and left the mitigated-zone retention maths
+        // without a scale.
         private string _chartTfLabel = "";
         /// <summary>Measured chart timeframe in minutes; scales HTF-relative windows.</summary>
         private int _chartMinutes;
+        private bool _chartTfResolved;
+        private bool _chartTfRegular = true;
+        private double _chartTfApproxMinutes = 1;
+        private long _chartTfSeconds = 60;
         /// <summary>Session start detected from bar-timestamp gaps; -1 = not resolved yet.</summary>
         private int _dailyAnchorResolved = -1;
         /// <summary>Human description of how the daily boundary was arrived at (badge/journal).</summary>
@@ -122,9 +134,32 @@ namespace ICTSMC
         private RenderModel _renderModel = RenderModel.Empty;
         private bool _renderDirty = true;
 
+        // Cached view collections. Rebuilt only when engine state actually changed; the
+        // published RenderModel wrapper is cheap to re-create every tick so that the
+        // price-relative scalars stay live without recopying up to a few hundred zones.
+        private List<ZoneView> _zonesView = new();
+        private List<LiquidityView> _liquidityView = new();
+        private List<StructureView> _structureView = new();
+        private List<CandleView> _candlesView = new();
+        private int _candlesFirstBar;
+
+        /// <summary>Candles carried in the snapshot for the /shot renderer (120 drawn + headroom).</summary>
+        private const int SnapshotCandleBuffer = 160;
+
         // Parsed killzone windows, rebuilt whenever the setting string changes.
         private List<TimeWindow> _killzones = new();
         private string _killzonesParsedFrom;
+
+        // Deferred, coalesced work triggered from the SETTINGS thread. ATAS drives property
+        // writes from the UI, and a numeric editor writes on every keystroke; acting on each
+        // one produced a full rebuild (and a fresh journal file set) per intermediate value.
+        private Timer _recalcDebounce;
+        private Timer _hubRegisterDebounce;
+        private readonly object _deferredLock = new();
+        private bool _disposed;
+
+        private const int RecalcDebounceMs = 400;
+        private const int HubRegisterDebounceMs = 700;
 
         #endregion
 
@@ -146,7 +181,73 @@ namespace ICTSMC
             // a full rebuild dozens of times per chart load, so the trigger only arms
             // once the indicator has actually calculated something.
             if (_settingsLive)
-                RecalculateValues();
+                RequestRecalculate();
+        }
+
+        /// <summary>
+        /// Coalesces recalculation requests.
+        ///
+        /// A numeric field in the ATAS property grid writes its property on every keystroke,
+        /// so "3" on the way to "30" is a real assignment. Recalculating synchronously there
+        /// discarded all engine state and opened a new journal file set per intermediate
+        /// value — a directory of near-empty CSVs and a chart that rebuilt itself several
+        /// times while the user was still typing. One debounced rebuild after the edit
+        /// settles is the same end state at a fraction of the cost.
+        /// </summary>
+        private void RequestRecalculate()
+        {
+            lock (_deferredLock)
+            {
+                if (_disposed)
+                    return;
+
+                _recalcDebounce ??= new Timer(_ => SafeRecalculate(), null, Timeout.Infinite, Timeout.Infinite);
+                _recalcDebounce.Change(RecalcDebounceMs, Timeout.Infinite);
+            }
+        }
+
+        private void SafeRecalculate()
+        {
+            try
+            {
+                if (!_disposed)
+                    RecalculateValues();
+            }
+            catch
+            {
+                // The indicator may already be detached from the chart; a failed rebuild
+                // must never surface as an unhandled exception on a timer thread.
+            }
+        }
+
+        /// <summary>
+        /// Coalesces Telegram hub registrations, for the same reason as
+        /// <see cref="RequestRecalculate"/>: typing a bot token character by character
+        /// otherwise started and tore down one long-poll loop per keystroke.
+        /// </summary>
+        private void RequestHubRegistration()
+        {
+            lock (_deferredLock)
+            {
+                if (_disposed)
+                    return;
+
+                _hubRegisterDebounce ??= new Timer(_ => SafeHubRegister(), null, Timeout.Infinite, Timeout.Infinite);
+                _hubRegisterDebounce.Change(HubRegisterDebounceMs, Timeout.Infinite);
+            }
+        }
+
+        private void SafeHubRegister()
+        {
+            try
+            {
+                if (!_disposed)
+                    TelegramHub.Register(this);
+            }
+            catch
+            {
+                // Registration is best-effort; the hub re-registers on the next change.
+            }
         }
 
         #region General settings
@@ -214,6 +315,30 @@ namespace ICTSMC
         {
             get => _useProtectedSwings;
             set => Set(ref _useProtectedSwings, value);
+        }
+
+        private bool _requireDisplacementForMss = true;
+
+        /// <summary>
+        /// An MSS must DISPLACE, or it is recorded as a BoS instead.
+        ///
+        /// Without this, "MSS" means nothing more than "this break went the other way to the
+        /// last one" — <c>isMss = _trend == -1</c> — so every leg reversal is a shift and, in
+        /// a range, every oscillation between the same two extremes arms the entry model.
+        /// MaxTrapChainHops bounds the trap-arm chain but does nothing about this path,
+        /// because range extremes are swept constantly and those sweeps close back inside,
+        /// so RequireTrapForEntry passes too.
+        ///
+        /// The proof applied is the one the order-block engine already uses, for the same
+        /// reason: magnitude (ATR × DisplacementAtrFactor from the leg's origin) AND velocity
+        /// (the leg left an unfilled imbalance). A genuine structural shift displaces; a
+        /// range oscillation drifts. Demotions are journaled as MssDemoted with the numbers.
+        /// </summary>
+        [Display(GroupName = GrpStructure, Name = "MSS must displace (else recorded as BoS)", Order = 203)]
+        public bool RequireDisplacementForMss
+        {
+            get => _requireDisplacementForMss;
+            set => Set(ref _requireDisplacementForMss, value);
         }
 
         [Display(GroupName = GrpStructure, Name = "Max structure labels on chart", Order = 205)]
@@ -493,6 +618,37 @@ namespace ICTSMC
             set => Set(ref _dailyAnchorMinutes, Math.Clamp(value, 0, 1439));
         }
 
+        private WeekAnchorMode _weeklyAnchorMode = WeekAnchorMode.Auto;
+
+        /// <summary>
+        /// Which WEEKDAY the weekly bucket opens on — a separate question from the
+        /// minute-of-day anchor, and one the previous build never asked.
+        ///
+        /// Weekly buckets are truncated from absolute ticks, and .NET tick zero
+        /// (0001-01-01) is a Monday, so an unshifted week always opened Monday at the daily
+        /// anchor. The futures week opens SUNDAY evening, which meant PWH/PWL and the W
+        /// layer folded roughly an extra day of the current week into "last week's" extreme.
+        ///
+        /// Auto resolves to Sunday when a recurring daily session gap was detected (i.e. the
+        /// instrument has a session, so it is almost certainly a futures week) and Monday
+        /// otherwise, which keeps 24/7 and cash instruments on the calendar week.
+        /// </summary>
+        [Display(GroupName = GrpHtf, Name = "Weekly anchor weekday mode", Order = 716)]
+        public WeekAnchorMode WeeklyAnchorMode
+        {
+            get => _weeklyAnchorMode;
+            set => Set(ref _weeklyAnchorMode, value);
+        }
+
+        private DayOfWeek _weeklyAnchorDay = DayOfWeek.Monday;
+
+        [Display(GroupName = GrpHtf, Name = "Weekly anchor weekday (Manual mode)", Order = 717)]
+        public DayOfWeek WeeklyAnchorDay
+        {
+            get => _weeklyAnchorDay;
+            set => Set(ref _weeklyAnchorDay, value);
+        }
+
         private int _intradayAnchorMinutes;
 
         /// <summary>
@@ -529,23 +685,17 @@ namespace ICTSMC
             set => Set(ref _htfObEnabled, value);
         }
 
-        private decimal _htfDisplacementFactor = 1.3m;
-        [Display(GroupName = GrpHtf, Name = "HTF displacement (legacy — unused; OBs now use the ATR × filter)", Order = 740)]
-        [Range(0, 10)]
-        public decimal HtfDisplacementFactor
-        {
-            get => _htfDisplacementFactor;
-            set => Set(ref _htfDisplacementFactor, Math.Clamp(value, 0m, 10m));
-        }
+        // Legacy, retained only so charts saved against an older build still deserialize.
+        // Hidden from the property grid and deliberately NOT routed through Set<T>: nothing
+        // reads them, so triggering a full recalculation (and a new journal session) when
+        // they change was pure cost for no effect.
+        [Browsable(false)]
+        [Display(GroupName = GrpHtf, Name = "HTF displacement (legacy — unused)", Order = 740)]
+        public decimal HtfDisplacementFactor { get; set; } = 1.3m;
 
-        private int _htfStructureLookback = 5;
-        [Display(GroupName = GrpHtf, Name = "HTF structure lookback (legacy — unused; swing structure is used)", Order = 742)]
-        [Range(2, 30)]
-        public int HtfStructureLookback
-        {
-            get => _htfStructureLookback;
-            set => Set(ref _htfStructureLookback, Math.Clamp(value, 2, 30));
-        }
+        [Browsable(false)]
+        [Display(GroupName = GrpHtf, Name = "HTF structure lookback (legacy — unused)", Order = 742)]
+        public int HtfStructureLookback { get; set; } = 5;
 
         [Display(GroupName = GrpHtf, Name = "HTF zone border color", Order = 745)]
         public Color HtfBorderColor { get; set; } = Color.FromArgb(0xFF, 0xD4, 0xAF, 0x37);
@@ -701,6 +851,63 @@ namespace ICTSMC
             set => Set(ref _slBufferTicks, Math.Clamp(value, 0, 100));
         }
 
+        private bool _htfBiasFilterEnabled;
+
+        /// <summary>
+        /// Refuse entries that trade against a higher-timeframe layer's own structure.
+        ///
+        /// Every HTF layer already runs the full swing / protected-swing / break engine, but
+        /// until now the resulting bias was computed and thrown away: HTF touched nothing but
+        /// the A++/A+/B confluence tier, so an A++ short against bullish Daily structure was
+        /// indistinguishable from one aligned with it. The bias is now recorded on every
+        /// signal (and in signals.csv) whether or not this filter is on, so its value can be
+        /// measured from the journal BEFORE it is trusted to veto trades.
+        ///
+        /// Ships OFF, like the other discretionary filters: enabling it changes which signals
+        /// fire, and that is a trading decision rather than a correctness one.
+        /// </summary>
+        [Display(GroupName = GrpSignal, Name = "Require HTF bias alignment", Order = 853)]
+        public bool HtfBiasFilterEnabled
+        {
+            get => _htfBiasFilterEnabled;
+            set => Set(ref _htfBiasFilterEnabled, value);
+        }
+
+        private int _minRiskTicks;
+
+        /// <summary>
+        /// Reject signals whose stop distance is below this (0 = off).
+        ///
+        /// Risk is entirely determined by the trigger zone's height plus the buffer, with no
+        /// floor: a 2-tick FVG on NQ yields a 6-tick stop, which is inside normal noise and
+        /// sometimes inside the spread. Such a signal is not a trade, it is a coin flip with
+        /// commission.
+        /// </summary>
+        [Display(GroupName = GrpSignal, Name = "Min risk (ticks, 0 = off)", Order = 854)]
+        [Range(0, 10000)]
+        public int MinRiskTicks
+        {
+            get => _minRiskTicks;
+            set => Set(ref _minRiskTicks, Math.Clamp(value, 0, 10000));
+        }
+
+        private decimal _maxRiskAtr;
+
+        /// <summary>
+        /// Reject signals whose stop distance exceeds ATR × this (0 = off).
+        ///
+        /// The mirror of <see cref="MinRiskTicks"/>: a Daily order block can produce a stop so
+        /// wide that 3R is unreachable inside the signal timeout, so the trade resolves as a
+        /// Timeout by construction rather than by outcome — which quietly pollutes expectancy.
+        /// </summary>
+        [Display(GroupName = GrpSignal, Name = "Max risk (ATR ×, 0 = off)", Order = 855)]
+        [Range(0, 50)]
+        public decimal MaxRiskAtr
+        {
+            get => _maxRiskAtr;
+            set => Set(ref _maxRiskAtr, Math.Clamp(value, 0m, 50m));
+        }
+
         private bool _continuationSignalsEnabled = true;
         [Display(GroupName = GrpSignal, Name = "C-tier continuation signals (Non-ICT)", Order = 860)]
         public bool ContinuationSignalsEnabled
@@ -769,9 +976,13 @@ namespace ICTSMC
             set
             {
                 _telegramBotToken = value;
-                // A token change must reach the command hub without waiting for a
-                // chart reload, so the right poller starts listening immediately.
-                TelegramHub.Register(this);
+                // A token change must reach the command hub without waiting for a chart
+                // reload, but the property grid writes on every keystroke — so the
+                // registration is debounced, and HubToken additionally refuses anything
+                // that is not shaped like a bot token. Between them, typing a token no
+                // longer starts and tears down a long-poll loop per character (nor sends
+                // token prefixes to Telegram).
+                RequestHubRegistration();
             }
         }
 
@@ -854,6 +1065,10 @@ namespace ICTSMC
             _htfInfo = "";
             _chartTfLabel = "";
             _chartMinutes = 0;
+            _chartTfResolved = false;
+            _chartTfRegular = true;
+            _chartTfApproxMinutes = 1;
+            _chartTfSeconds = 60;
             _dailyAnchorResolved = -1;
             _dailyAnchorInfo = "";
             _currentDayBucket = DateTime.MinValue;
@@ -886,8 +1101,49 @@ namespace ICTSMC
             _legExtreme = null;
             _renderModel = RenderModel.Empty;
             _renderDirty = true;
+            _zonesView = new List<ZoneView>();
+            _liquidityView = new List<LiquidityView>();
+            _structureView = new List<StructureView>();
+            _candlesView = new List<CandleView>();
+            _candlesFirstBar = 0;
             _killzonesParsedFrom = null;
             InitJournalSession();
+        }
+
+        /// <summary>
+        /// Deterministic teardown. Without this the indicator relied entirely on the GC:
+        /// the Telegram hub only ever dropped an instance once its WeakReference was
+        /// collected, so removing the last chart using a bot token left that token's
+        /// long-poll loop running for the life of the ATAS process; queued journal rows
+        /// could be lost; and the render pen cache was never released.
+        /// </summary>
+        protected override void OnDispose()
+        {
+            lock (_deferredLock)
+            {
+                _disposed = true;
+                _recalcDebounce?.Dispose();
+                _recalcDebounce = null;
+                _hubRegisterDebounce?.Dispose();
+                _hubRegisterDebounce = null;
+            }
+
+            // Stops this instance's poller when no other chart still uses its token.
+            try { TelegramHub.Unregister(this); } catch { /* teardown is best-effort */ }
+
+            // Push anything still buffered and give the serialized IO chain a bounded
+            // window to land it. An audit trail that silently loses its last rows on
+            // shutdown is worse than one that costs a moment to close.
+            try
+            {
+                FlushJournalBuffers();
+                DrainJournalIo(TimeSpan.FromSeconds(2));
+            }
+            catch { /* journaling must never block or throw during teardown */ }
+
+            try { DisposePenCache(); } catch { /* render resources */ }
+
+            base.OnDispose();
         }
 
         #region Render model publication
@@ -912,39 +1168,112 @@ namespace ICTSMC
         /// </summary>
         private void PublishRenderModel(int bar)
         {
-            if (!_renderDirty)
+            if (CurrentBar <= 0)
                 return;
 
-            _renderDirty = false;
-
-            var zones = new List<ZoneView>(_zones.Count);
-            foreach (var z in _zones)
-                zones.Add(new ZoneView(z));
-
-            var liquidity = new List<LiquidityView>(_liquidity.Count);
-            foreach (var l in _liquidity)
-                liquidity.Add(new LiquidityView(l));
-
-            var structure = new List<StructureView>(_structure.Count);
-            foreach (var e in _structure)
-                structure.Add(new StructureView(e));
-
             var lastBar = Math.Max(0, Math.Min(bar, CurrentBar - 1));
-            var lastClose = CurrentBar > 0 ? GetCandle(lastBar).Close : 0m;
+
+            // The COLLECTIONS are rebuilt only when engine state actually changed. Marking
+            // dirty on every tick that merely touched a zone meant copying up to a few
+            // hundred ZoneViews plus three list allocations per tick, on the data thread,
+            // for a snapshot identical to the previous one.
+            if (_renderDirty)
+            {
+                _renderDirty = false;
+
+                var zones = new List<ZoneView>(_zones.Count);
+                foreach (var z in _zones)
+                    zones.Add(new ZoneView(z));
+                _zonesView = zones;
+
+                var liquidity = new List<LiquidityView>(_liquidity.Count);
+                foreach (var l in _liquidity)
+                    liquidity.Add(new LiquidityView(l));
+                _liquidityView = liquidity;
+
+                var structure = new List<StructureView>(_structure.Count);
+                foreach (var e in _structure)
+                    structure.Add(new StructureView(e));
+                _structureView = structure;
+
+                RebuildCandleView(lastBar);
+            }
+
+            // The SCALARS are refreshed on every publish. Zone-distance culling and the live
+            // candle both track price, so they must not be frozen between state changes.
+            var live = GetCandle(lastBar);
+            var lastClose = live.Close;
 
             var range = GetDealingRange();
             var hasRange = range.HasValue;
-            var rangeHigh = hasRange ? range.Value.High.Price : 0m;
-            var rangeLow = hasRange ? range.Value.Low.Price : 0m;
-            var anchorBar = hasRange ? Math.Min(range.Value.High.Bar, range.Value.Low.Bar) : 0;
-
             var ote = GetOteBand();
 
-            // Volatile write: publishes the fully-constructed snapshot so the render
-            // thread can never observe a partially-initialised model.
-            Volatile.Write(ref _renderModel, new RenderModel(zones, liquidity, structure, _atr, lastClose, lastBar,
-                hasRange, rangeHigh, rangeLow, anchorBar,
-                ote.HasValue, ote?.Top ?? 0m, ote?.Bottom ?? 0m, _htfInfo));
+            // Volatile write: publishes the fully-constructed snapshot so no consumer
+            // thread can ever observe a partially-initialised model.
+            Volatile.Write(ref _renderModel, new RenderModel
+            {
+                Zones = _zonesView,
+                Liquidity = _liquidityView,
+                Structure = _structureView,
+                Candles = _candlesView,
+                CandlesFirstBar = _candlesFirstBar,
+                HasLiveCandle = true,
+                LiveCandle = new CandleView(live.Time, live.Open, live.High, live.Low, live.Close),
+                LiveBar = lastBar,
+                Atr = _atr,
+                LastClose = lastClose,
+                LastBar = lastBar,
+                HasRange = hasRange,
+                RangeHigh = hasRange ? range.Value.High.Price : 0m,
+                RangeLow = hasRange ? range.Value.Low.Price : 0m,
+                RangeAnchorBar = hasRange ? Math.Min(range.Value.High.Bar, range.Value.Low.Bar) : 0,
+                HasOte = ote.HasValue,
+                OteTop = ote?.Top ?? 0m,
+                OteBottom = ote?.Bottom ?? 0m,
+                HtfInfo = _htfInfo ?? ""
+            });
+        }
+
+        /// <summary>
+        /// Copies the recent COMPLETED candles into the snapshot so the Telegram /shot
+        /// renderer never calls GetCandle from its own thread. Built only when the snapshot
+        /// feature can actually be used, and only on a dirty publish — which OnBarComplete
+        /// guarantees at least once per bar, exactly the cadence the image needs. The
+        /// still-forming candle rides along as scalars instead.
+        /// </summary>
+        private void RebuildCandleView(int lastBar)
+        {
+            if (!SnapshotFeedRequired)
+            {
+                if (_candlesView.Count > 0)
+                {
+                    _candlesView = new List<CandleView>();
+                    _candlesFirstBar = 0;
+                }
+
+                return;
+            }
+
+            // lastBar is the still-forming candle; completed history stops one short of it.
+            var lastComplete = lastBar - 1;
+            if (lastComplete < 0)
+            {
+                _candlesView = new List<CandleView>();
+                _candlesFirstBar = 0;
+                return;
+            }
+
+            var first = Math.Max(0, lastComplete - SnapshotCandleBuffer + 1);
+            var candles = new List<CandleView>(lastComplete - first + 1);
+
+            for (var b = first; b <= lastComplete; b++)
+            {
+                var c = GetCandle(b);
+                candles.Add(new CandleView(c.Time, c.Open, c.High, c.Low, c.Close));
+            }
+
+            _candlesView = candles;
+            _candlesFirstBar = first;
         }
 
         #endregion
@@ -999,9 +1328,16 @@ namespace ICTSMC
         }
 
         /// <summary>
-        /// True when the bar's open time falls inside a configured killzone, or when
+        /// True when the moment being evaluated falls inside a configured killzone, or when
         /// the filter is off / no window parsed (fail-open: a malformed setting must
         /// never silently mute every signal).
+        ///
+        /// The time tested is the candle's LAST trade time, not its open. Testing the open
+        /// quantised every window to the bar grid: on a 1H chart a 13:30-16:00 killzone
+        /// admitted nothing before 14:00, because the 13:00 bar opens outside it — so the
+        /// window a user configured was silently not the window that ran. On a 4H chart the
+        /// configured times were close to meaningless. LastTime advances through the bar, so
+        /// the gate opens and closes when the clock says it should on any timeframe.
         /// </summary>
         private bool InKillzone(int bar)
         {
@@ -1012,7 +1348,24 @@ namespace ICTSMC
             if (windows.Count == 0)
                 return true;
 
-            var time = GetCandle(bar).Time;
+            return IsInKillzone(KillzoneTime(bar), windows);
+        }
+
+        /// <summary>
+        /// The instant a killzone decision applies to. LastTime is the timestamp of the most
+        /// recent trade in the candle, which during a live bar advances tick by tick and on a
+        /// completed bar sits at its close. Some providers leave it unset on synthetic or
+        /// backfilled candles, so the bar open remains the fallback.
+        /// </summary>
+        private DateTime KillzoneTime(int bar)
+        {
+            var candle = GetCandle(bar);
+            var last = candle.LastTime;
+            return last > candle.Time ? last : candle.Time;
+        }
+
+        private static bool IsInKillzone(DateTime time, List<TimeWindow> windows)
+        {
             var minuteOfDay = time.Hour * 60 + time.Minute;
 
             foreach (var w in windows)

@@ -56,6 +56,18 @@ the chart must never change what the strategy does. The same holds for `ShowOb`.
   not displacement — without this a 15-bar grind covering 1.5 × ATR passed exactly like
   one violent candle, and a *longer* lookback made the filter *easier*, which is
   backwards. Rejections are journaled as `ObRejected`.
+
+  Which windows count is decided by `Detection.cs → ImbalanceScanStart`, and it matters.
+  A three-candle window ending at bar `b` spans `[b-2, b]`, so the window ending one
+  candle after the order block **straddles the OB itself** — which is exactly where the
+  gap sits in the textbook shape: the last opposite candle, then one explosive candle
+  whose low opens clear of the high before it. The scan used to start two candles after
+  the OB and therefore skipped that window entirely, so whenever the order block sat
+  immediately before the breaking candle the loop ran zero times and the most canonical
+  OB in the book was rejected as drift. The scan now starts at the leg's first candle and
+  is clamped so the window ending at the break bar is always examined, which also covers
+  a leg that is a single engulfing candle. The identical rule runs on the HTF series
+  (`HtfLegHasImbalance`), so the two layers cannot disagree.
 - zone = open↔close body (default, as taught) or full range (`ObStyle`).
 
 **Breaker blocks** (`Detection.cs → ApplyBodyCloseMitigation`, toggle
@@ -71,8 +83,24 @@ touch-alerted, and eligible for entry matches and confluence scoring.
 > before trading reversals.”
 
 `Detection.cs → DetectStructureBreak`: close beyond the **protected** swing high/low.
-If it flips the tracked trend it is an **MSS** (solid, heavier stroke), otherwise a
-**BoS** (dashed, light). MSS arms the entry model; BoS does not.
+A break that flips the tracked trend is a *candidate* MSS (solid, heavier stroke);
+everything else is a **BoS** (dashed, light). MSS arms the entry model; BoS does not.
+
+**An MSS must also displace** (`Detection.cs → ClassifyBreak`, `BreakDisplaced`, toggle
+`RequireDisplacementForMss`, default on). Direction alone made "MSS" a synonym for *this
+break went the other way to the last one* — so in a range every oscillation between the
+same two extremes was a structural shift, and because an MSS is what arms the entry model,
+the machine was most active exactly where the book says to stand aside. `MaxTrapChainHops`
+does not help here: it bounds the trap-arm chain, while range extremes are swept constantly
+and those sweeps close back inside, so `RequireTrapForEntry` passes too.
+
+The proof is the pair `CreateOrderBlock` already demands, applied to the break's own leg —
+magnitude (`ATR × DisplacementAtrFactor` from the leg's origin) **and** velocity (the leg
+left an unfilled imbalance). A reversal that fails it is recorded as a BoS: it still flips
+the trend and still produces its order block, it simply does not arm a reversal setup.
+Demotions are journaled as `MssDemoted` with both numbers. The imbalance scan always
+reaches the break bar's own three-candle window, so a single engulfing displacement candle
+— which *is* the leg — is not mistaken for drift.
 
 **Protected swings** (`Detection.cs → AdoptProtectedHigh/AdoptProtectedLow`, toggle
 `UseProtectedSwings`, default on). Taking the most *recent* pivot unconditionally meant
@@ -129,12 +157,27 @@ entries inside an HTF zone are the highest-quality setups.
 - Ladder: `≤1m → 15m (+1H)`, `≤5m → 1H (+4H)`, `6m–1H → 4H (+D)`, `2H–4H → D (+W)`,
   `>4H → W`. The chosen HTF is guaranteed to sit strictly above the chart TF; a second
   layer is optional (`AutoSecondLayer`).
+- The chart timeframe is measured by `Detection.cs → UpdateChartTimeframe`, which runs on
+  every bar close **regardless of whether HTF mapping is enabled** — it is a property of the
+  chart, not of the feature. Deriving it inside `ConfigureHtfLayers` meant that turning HTF
+  off stripped the timeframe out of every alert identity (`GC` instead of `GC 1H`) and out
+  of the `/shot` chart names, and left the mitigated-zone retention maths without a scale.
 - Buckets are truncated from absolute ticks, so they never drift. Phase is controlled by
   two independent settings: `IntradayAnchorMinutes` (15m/1H/4H) and `DailyAnchorMinutes`
   (D/W, and PDH/PDL/PWH/PWL). Both default to 0 = clock-aligned, which matches ATAS
   (4H opens 00/04/08/12/16/20, 1H on the hour). They are separate because an instrument
   can be clock-aligned intraday and session-based daily; one shared anchor could not serve
   both. Phase matters — a two-hour shift changes 100% of the detected 4H FVG boundaries.
+- Weekly buckets carry a **weekday** anchor as well (`WeeklyAnchorMode`, Auto). .NET tick
+  zero is a Monday, so an unshifted week always opened Monday at the daily anchor — which
+  folded roughly an extra day of the current week into "last week" for any instrument whose
+  week opens Sunday evening, and with it PWH/PWL and the W layer. Auto resolves to Sunday
+  when a recurring daily session gap was detected and Monday otherwise, keeping 24/7 and
+  cash instruments on the calendar week.
+- Each layer's swing bookkeeping stores **indices into that layer's candle buffer**, and the
+  buffer is trimmed at 400 candles — about four days on a 15m layer. `RebaseHtfSwings`
+  shifts the stored indices to follow the trim and drops pivots whose candle is gone.
+  Without it the pivot de-duplication check compared a fresh index against a stale one.
 - The daily anchor is measured, not configured (`DailyAnchorMode` = Auto):
   `Detection.cs → DetectSessionAnchorMinutes` finds the trading day's start from the
   recurring daily gap in bar timestamps, over ~30 days so the window stays inside one
@@ -172,16 +215,36 @@ State machine in `Intrabar.cs`:
    forever off one historical sweep while `RequireSweepForEntry` was on. Each arming
    now records how many trap hops it sits from a real sweep (`TrapDepth` in the
    journal), and arming is refused past the budget.
-3. **Return to zone** — the first tick that trades **through the proximal edge** of an
-   aligned, unmitigated zone (`Intrabar.cs → EntryEdgeTraded`) triggers the signal.
-   Contact alone is not enough: the one-sided test it replaced stayed true while price
-   was anywhere *below* a bullish zone, so a long could fire with its quoted entry above
-   the market and its stop already traded through. Contact without an edge cross is
-   journaled as `EntryRejected` and leaves the setup armed.
-4. **Killzone gate** (`ICTSMCStrategy.cs → InKillzone`, `KillzoneFilterEnabled`, off by
+3. **Return to zone** — the first tick that trades **through the proximal edge, approaching
+   from outside** (`Intrabar.cs → EntryEdgeTraded`) triggers the signal. Two separate
+   mistakes have been closed here. Contact alone is not enough: the one-sided test stayed
+   true while price was anywhere *below* a bullish zone, so a long could fire with its
+   quoted entry above the market. And the straddle test that replaced it was
+   direction-blind — `high >= Top && low <= Top` is equally true of price *leaving* the
+   zone upward, which is the common shape when the MSS printed on the retest and the model
+   armed with price already inside. The bar must now **open** at or beyond the edge, which
+   also makes the trigger-selection rule (highest top for a long, on the assumption of a
+   falling tap) true by construction. Either failure is journaled as `EntryRejected` and
+   leaves the setup armed.
+4. **Risk bounds** (`MinRiskTicks`, `MaxRiskAtr`, both 0 = off). Risk is entirely the
+   trigger zone's height plus the buffer, and zone heights span orders of magnitude: a
+   2-tick imbalance yields a stop inside the spread, a Daily order block one so wide that
+   3R cannot be reached before the signal times out, so the trade resolves by clock rather
+   than by outcome. Applied as a filter over candidate zones, so a rejection never consumes
+   the armed setup.
+5. **HTF bias** (`HtfBiasFilterEnabled`, off). Every HTF layer already runs the full
+   swing/protected-swing/break engine, but the resulting bias used to be computed and
+   discarded — HTF touched nothing but the confluence tier, so an A++ short against bullish
+   Daily structure was indistinguishable from one aligned with it. The bias is now recorded
+   on **every** signal (`HtfBias` in signals.csv, and in the alert) whether or not the
+   filter is on, so its value is measurable from the journal before it is trusted to veto.
+6. **Killzone gate** (`ICTSMCStrategy.cs → InKillzone`, `KillzoneFilterEnabled`, off by
    default): entries only inside the configured session windows. Off by default only
    because the correct times depend on your platform's timezone, which the indicator
    cannot know — ICT practice is to enable it. Outside a window the setup stays armed.
+   The time tested is the candle's `LastTime`, not its open: testing the open quantised
+   every window to the bar grid, so on a 1H chart a `13:30-16:00` killzone admitted
+   nothing before 14:00 and on a 4H chart the configured times were close to meaningless.
 
 Confluence tiering: Daily/Weekly zone in the stack → **A++**, any HTF zone → **A+**,
 LTF-only → **B**; C-tier is the explicitly demoted non-ICT continuation play.
@@ -202,14 +265,29 @@ historical bar can no longer make the whole replay fire alerts and journal itsel
 
 ## 9. Threading
 
-`OnRender` runs on the chart's drawing thread; `OnCalculate` runs on the data thread.
-The renderer never touches the engine's live collections. The calculation thread
-publishes an immutable `RenderModel` snapshot (`ICTSMCStrategy.cs → PublishRenderModel`)
-with a single volatile write, and `OnRender` performs a single volatile read and works
-from value types only. Enumerating the live `List<T>` state across threads was a genuine
-data race — not merely “collection was modified”, but torn reads of the backing array
-during a resize. `OnRender` is additionally wrapped in a catch-all, because ATAS gives
-it no exception boundary of its own and a throw there degrades the chart for the session.
+`OnRender` runs on the chart's drawing thread; `OnCalculate` runs on the data thread; the
+Telegram `/shot` renderer runs on a poller thread. **None of them touch the engine's live
+collections.** The calculation thread publishes an immutable `RenderModel` snapshot
+(`ICTSMCStrategy.cs → PublishRenderModel`) with a single volatile write, and every consumer
+performs a single volatile read and works from value types only. Enumerating the live
+`List<T>` state across threads was a genuine data race — not merely “collection was
+modified”, but torn reads of the backing array during a resize. `OnRender` is additionally
+wrapped in a catch-all, because ATAS gives it no exception boundary of its own and a throw
+there degrades the chart for the session.
+
+The `/shot` snapshot renderer used to be the exception: it read `_zones`, `_liquidity` and
+`_structure` directly and called `GetCandle`/`GetDealingRange` from the poller thread, and
+answered the race with a three-attempt retry. A retry catches an exception; it cannot catch
+a torn read, and a `decimal` is 16 bytes, so a price written concurrently could be observed
+half-updated and drawn into an image the user then trades from. It now renders from the
+same published snapshot — which carries a rolling buffer of completed candles plus the
+live one — and needs no retries at all.
+
+The snapshot is also **cheap to republish**: the collections are rebuilt only when engine
+state actually changed, while the price-relative scalars refresh on every tick. Marking the
+model dirty on every tick that merely touched a zone meant copying up to a few hundred
+`ZoneView`s plus three list allocations per tick, on the data thread, for an identical
+result.
 
 ## Mitigation rules
 
