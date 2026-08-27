@@ -241,10 +241,11 @@ namespace ICTSMC
 
                 if (zone.IsHtf)
                 {
-                    // HTF zones are frames, not fills — they outline confluence
-                    // without stacking paint over the LTF zones inside them. The
-                    // heavier 2px stroke marks them as HTF; the hue marks the side.
-                    context.DrawRectangle(GetPen(Color.FromArgb(220, HtfColor(zone.IsBullish)), 2), rect);
+                    // HTF zones are frames, not fills — they outline confluence without
+                    // stacking paint over the LTF zones inside them. Hue = direction,
+                    // weight and dash = layer.
+                    var (width, dash) = HtfStroke(zone.HtfMinutes);
+                    context.DrawRectangle(GetPen(Color.FromArgb(220, HtfColor(zone.IsBullish)), width, dash), rect);
                 }
                 else
                 {
@@ -285,8 +286,21 @@ namespace ICTSMC
             if (rect.Width < size.Width + 10 || rect.Height < size.Height + 4)
                 return;
 
-            var textX = rect.Left + (rect.Width - size.Width) / 2;
-            var textY = rect.Top + (rect.Height - size.Height) / 2;
+            int textX, textY;
+
+            if (zone.IsHtf)
+            {
+                // Tucked just inside the top-left of the frame. An HTF frame usually ENCLOSES
+                // the chart-timeframe zones it gives confluence to, so centring both put one
+                // label straight on top of the other — the "1H FVG"/"FVG" collision.
+                textX = rect.Left + 6;
+                textY = rect.Top + 3;
+            }
+            else
+            {
+                textX = rect.Left + (rect.Width - size.Width) / 2;
+                textY = rect.Top + (rect.Height - size.Height) / 2;
+            }
 
             // Backdrop pill: keeps the tag readable where zones overlap candles.
             context.FillRectangle(Color.FromArgb(LabelBackdropAlpha, 14, 17, 22),
@@ -329,8 +343,24 @@ namespace ICTSMC
             context.DrawString(text, StructureFont, textColor, textX, textY);
         }
 
-        /// <summary>Frame colour for an HTF zone — metallic either way, directional by hue.</summary>
+        /// <summary>Frame colour for an HTF zone — hue carries the DIRECTION.</summary>
         private Color HtfColor(bool bullish) => bullish ? HtfBorderColor : HtfBearBorderColor;
+
+        /// <summary>
+        /// Frame stroke for an HTF zone — weight and dash carry the LAYER.
+        ///
+        /// Colour is already spent on direction, and giving each layer its own hue as well
+        /// would mean six HTF colours competing with the eight chart-timeframe ones: the
+        /// clutter would be worse than the ambiguity it fixed. Weight is a free second
+        /// channel, and it encodes something real rather than arbitrary — the 3px tier is
+        /// exactly the ≥1440-minute layer that makes a signal A++.
+        /// </summary>
+        private static (int Width, DashStyle Dash) HtfStroke(int htfMinutes) => htfMinutes switch
+        {
+            >= 1440 => (3, DashStyle.Solid),  // Daily and Weekly — the A++ layer
+            >= 240 => (2, DashStyle.Solid),   // 4H
+            _ => (1, DashStyle.Dash)          // 15m / 1H — lightest, most numerous
+        };
 
         private Color ZoneColor(ZoneType type) => type switch
         {
@@ -423,11 +453,13 @@ namespace ICTSMC
                 x1 = Math.Max(x1, region.Left);
                 x2 = Math.Min(x2, region.Right);
 
-                // `---- MSS ----` solid and heavier, `---- BoS ----` dashed and light:
-                // an MSS is the stronger, rarer event and should read that way at a glance.
+                // Both structure events are DASHED, matching the liquidity lines: these are
+                // all "a level that mattered", drawn in the same visual language. An MSS is
+                // still the stronger, rarer event and reads that way through weight and
+                // opacity rather than through a solid stroke.
                 var color = evt.Bullish ? BullStructureColor : BearStructureColor;
                 var pen = evt.IsMss
-                    ? GetPen(Color.FromArgb(200, color), 2)
+                    ? GetPen(Color.FromArgb(215, color), 2, DashStyle.Dash)
                     : GetPen(Color.FromArgb(150, color), 1, DashStyle.Dash);
 
                 DrawLabeledLine(context, pen, evt.IsMss ? "MSS" : "BoS",
