@@ -68,7 +68,46 @@ toggle:
 
 ### Behaviour changes you should know about
 
-If you have run an earlier build, these change what fires:
+**From the code audit (this build):**
+
+- **An MSS must displace** (`RequireDisplacementForMss`, **on**) — "MSS" previously meant
+  nothing more than *this break went the other way to the last one*, so in a range every
+  oscillation between the same two extremes armed the entry model. A reversal break now
+  has to clear the same two proofs an order block demands — ATR magnitude and a genuine
+  imbalance in the leg — or it is recorded as an ordinary BoS. It still flips the trend and
+  still produces its order block; it simply does not arm a reversal. Demotions are
+  journaled as `MssDemoted` with the numbers. **Expect materially fewer signals in chop.**
+- **The entry edge must be crossed from OUTSIDE the zone.** The previous test asked only
+  whether the bar had touched both sides of the proximal edge — equally true of price
+  *leaving* the zone. A long could still fire quoting an entry below the market when the
+  model armed while price sat inside a bullish zone. The bar must now open at or beyond
+  the edge.
+- **History replay no longer skips the signal bar.** Replayed signals had both excursion
+  marks set to the completed candle's own extremes, so the signal bar contributed zero
+  MAE/MFE and a same-bar stop-out could not be recorded — the `HIST` backfill was
+  optimistic in exactly the way it was documented not to be. Replayed signals now treat the
+  whole signal bar as exposure (stop-first, as everywhere else) and are tagged
+  `bar-conservative` in the new `Sequenced` column.
+- **Weekly buckets have a weekday anchor** (`WeeklyAnchorMode`, Auto). Weeks used to always
+  open Monday, so for any session instrument PWH/PWL and the W layer folded roughly an
+  extra day of the current week into "last week". Auto picks Sunday when a daily session
+  gap is detected, Monday otherwise.
+- **Killzones are matched against the tick, not the bar open.** On a 1H chart a
+  `13:30-16:00` window admitted nothing before 14:00, because the 13:00 bar opens outside
+  it. The window you configure is now the window that runs, on any timeframe.
+- **The chart timeframe is measured even with HTF mapping off**, so alert identities keep
+  their `GC 1H` suffix and `/shot` chart names stay unambiguous.
+- **Telegram delivery is ordered, rate-limited and instrumented.** Sends were independent
+  fire-and-forget tasks whose responses were discarded, so an exit warning could overtake
+  its own entry and a throttled alert was indistinguishable from a delivered one. Failures
+  now journal as `AlertFailed` with the status code.
+- **New opt-in filters** (both off, both journaled when they veto): `HtfBiasFilterEnabled`
+  refuses entries against a higher-timeframe layer's own structure, and
+  `MinRiskTicks` / `MaxRiskAtr` reject plans whose stop distance is inside the noise or too
+  wide for 3R to be reachable. The HTF bias is **recorded on every signal either way**, so
+  its value can be measured from the journal before it is trusted to veto anything.
+
+**From earlier builds:**
 
 - **Protected-swing structure** (`UseProtectedSwings`, on) — breaking a minor pullback
   high is internal structure and no longer prints a BoS/MSS, creates an order block, or
@@ -206,14 +245,19 @@ the ATAS Indicators folder (see the note above — normally
   zone style (body vs full range), mitigation rule per type:
   `AnyTouch`, `Midline` (50%), `FullFill`, `BodyClose`
 - **Liquidity** — equal-level tolerance in ticks, max levels per side
+- **Market structure** — swing period, protected swings, and `RequireDisplacementForMss`
+  (on): a reversal break must displace or it is recorded as a BoS
 - **HTF** — Auto/Manual selection, optional second HTF layer, daily session anchor
-  (e.g. 1080 = 18:00 platform time for futures), HTF FVG/OB toggles, displacement
-  factor, per-layer zone cap, info badge. In Auto mode the chart TF is estimated from
+  (e.g. 1080 = 18:00 platform time for futures), **weekly weekday anchor**
+  (`WeeklyAnchorMode`, Auto → Sunday for session instruments), HTF FVG/OB toggles,
+  per-layer zone cap, info badge. In Auto mode the chart TF is estimated from
   the mode of bar-open time deltas (robust to session gaps); on tick/volume/range
   charts the median bar duration is rounded up to a standard TF — verify via the badge
 - **Entry model** — require sweep, sweep→MSS and MSS→entry windows,
   premium/discount filter + tolerance, opposite-MSS cancellation, failed-MSS trap
-  arming (IFVG logic), SL buffer ticks
+  arming (IFVG logic), SL buffer ticks, **HTF bias filter** (off) and
+  **min/max risk bounds** (off). Every one of these leaves the setup armed when it
+  vetoes, and writes an `EntryRejected` row explaining why
 - **Palette** — every zone family has its own hue so the chart reads at a glance:
   OB green/red, FVG blue/orange, IFVG teal/purple, breakers green/red, HTF zones rendered as gold 2px frames; EQH/EQL pools and PDH/PDL/PWH/PWL draw with a heavier stroke; labels sit on a translucent backdrop pill and auto-hide when a zone is too small,
   so zooming out never leaves orphaned text
@@ -232,7 +276,10 @@ never collide into one file even when they recalculate in the same second:
   (PD filter veto with zone mid vs EQ±tolerance and the exact excess), `SweepExpired` —
   every signal that did NOT fire is explained with numbers, zero ambiguity
 - `*-signals.csv` — every entry signal with tier, arm source (Sweep / TrapArm /
-  Sweep+Trap), trigger zone, entry/SL/TP2/TP3, PD status, confluence stack
+  Sweep+Trap), trigger zone, entry/SL/TP2/TP3, PD status, confluence stack, the
+  **HTF bias stack** at the moment of the signal (`4H↑ D↓`), and a `Sequenced` column
+  reading `intrabar` for live signals or `bar-conservative` for replayed ones, whose
+  signal bar is resolved stop-first because intrabar ordering is unknowable in history
 - `*-outcomes.csv` — resolution per signal (SL / TP2 / TP3 / Timeout, conservative
   SL-first on ambiguous bars), R-multiple, **MAE/MFE in R**, bars held, plus two
   **shadow trade-management results** simulated in parallel for every signal

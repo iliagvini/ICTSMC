@@ -23,7 +23,7 @@ namespace ICTSMC
     /// inline-keyboard list of the charts wired to the requesting chat, and on a
     /// button tap renders a fresh PNG of that chart's current state — candles
     /// plus every zone, liquidity line, EQ and structure marker, in the
-    /// indicator's own visual style — and sends it via sendPhoto.
+    /// indicator's own visual style.
     ///
     /// The image is drawn from live data, so it works even when ATAS is
     /// minimized or the chart sits in a background tab. Commands from chat ids
@@ -38,19 +38,55 @@ namespace ICTSMC
             set
             {
                 _telegramRemoteEnabled = value;
-                TelegramHub.Register(this);
+                RequestHubRegistration();
             }
         }
 
         private bool _telegramRemoteEnabled = true;
 
-        /// <summary>Bot token this chart is reachable under, or null when remote is off.</summary>
+        /// <summary>
+        /// Bot token this chart is reachable under, or null when remote is off.
+        ///
+        /// The shape check is not cosmetic: the property grid writes the token on every
+        /// keystroke, so without it every prefix of a token started a poller that then
+        /// long-polled Telegram with a partial credential before being torn down.
+        /// </summary>
         internal string HubToken =>
-            TelegramEnabled && TelegramRemoteEnabled && !string.IsNullOrWhiteSpace(TelegramBotToken)
+            TelegramEnabled && TelegramRemoteEnabled && LooksLikeBotToken(TelegramBotToken)
                 ? TelegramBotToken.Trim()
                 : null;
 
         internal string HubChatId => TelegramChatId?.Trim() ?? "";
+
+        /// <summary>True when a /shot request could actually be served for this chart.</summary>
+        internal bool SnapshotFeedRequired => HubToken != null && HubChatId.Length > 0;
+
+        /// <summary>
+        /// A bot token is "&lt;numeric bot id&gt;:&lt;secret&gt;", where Telegram's secret is 35
+        /// characters. The length floor is exactly 35 rather than a looser guess on purpose:
+        /// anything shorter accepts a PREFIX of a real token, which is precisely what the
+        /// property grid produces while the user is still typing one.
+        /// </summary>
+        private const int BotTokenSecretLength = 35;
+
+        internal static bool LooksLikeBotToken(string token)
+        {
+            if (string.IsNullOrWhiteSpace(token))
+                return false;
+
+            var t = token.Trim();
+            var colon = t.IndexOf(':');
+            if (colon <= 0 || colon >= t.Length - 1)
+                return false;
+
+            for (var i = 0; i < colon; i++)
+            {
+                if (!char.IsDigit(t[i]))
+                    return false;
+            }
+
+            return t.Length - colon - 1 >= BotTokenSecretLength;
+        }
 
         /// <summary>Stable per-instance key used in callback buttons.</summary>
         internal string HubKey => _hubKey ??= Guid.NewGuid().ToString("N")[..12];
@@ -68,59 +104,75 @@ namespace ICTSMC
         #region Snapshot renderer
 
         /// <summary>
-        /// Called from the hub's poller thread. The chart thread may mutate the
-        /// zone/liquidity/structure lists mid-render, so the render is retried on
-        /// the (rare, benign) collection-changed race instead of locking the hot
-        /// trading path.
+        /// Called from the hub's poller thread.
+        ///
+        /// It works exclusively from the immutable <see cref="RenderModel"/> the calculation
+        /// thread publishes — the same discipline OnRender follows. The previous version read
+        /// the live _zones/_liquidity/_structure collections and called GetCandle and
+        /// GetDealingRange directly from this thread, and answered the resulting race with a
+        /// retry loop. A retry catches an exception; it cannot catch a torn read, and a
+        /// `decimal` is 16 bytes, so a price written concurrently could be observed
+        /// half-updated and rendered into an image the user then trades from. Reading one
+        /// published snapshot removes the race outright, and with it the need to retry.
         /// </summary>
         internal byte[] TryRenderSnapshot()
         {
-            for (var attempt = 0; attempt < 3; attempt++)
+            try
             {
-                try
-                {
-                    return RenderSnapshot();
-                }
-                catch
-                {
-                    Thread.Sleep(120);
-                }
+                var model = Volatile.Read(ref _renderModel);
+                return model == null ? null : RenderSnapshot(model);
             }
-
-            return null;
+            catch
+            {
+                return null;
+            }
         }
 
-        private byte[] RenderSnapshot()
+        private byte[] RenderSnapshot(RenderModel model)
         {
             const int width = 1280, height = 720;
             const int barsBack = 120;
 
-            var last = CurrentBar - 1;
-            if (last < 5)
-                throw new InvalidOperationException("not enough bars");
+            // Completed candles from the snapshot, plus the still-forming one, which rides
+            // along as scalars so it stays current between collection rebuilds.
+            var completed = model.Candles;
+            var all = new List<CandleView>(completed.Count + 1);
+            all.AddRange(completed);
 
-            var first = Math.Max(0, last - barsBack + 1);
-            var count = last - first + 1;
+            var seriesFirstBar = completed.Count > 0 ? model.CandlesFirstBar : model.LiveBar;
+
+            // Only append the live candle when it genuinely continues the completed run.
+            if (model.HasLiveCandle &&
+                (completed.Count == 0 || model.LiveBar == model.CandlesFirstBar + completed.Count))
+                all.Add(model.LiveCandle);
+
+            if (all.Count < 5)
+                return null;
+
+            var skip = Math.Max(0, all.Count - barsBack);
+            var view = all.GetRange(skip, all.Count - skip);
+            var first = seriesFirstBar + skip;
+            var last = first + view.Count - 1;
+            var count = view.Count;
 
             var hi = decimal.MinValue;
             var lo = decimal.MaxValue;
-            for (var b = first; b <= last; b++)
+            foreach (var c in view)
             {
-                var c = GetCandle(b);
                 if (c.High > hi) hi = c.High;
                 if (c.Low < lo) lo = c.Low;
             }
 
             if (hi <= lo)
-                throw new InvalidOperationException("flat range");
+                return null;
 
             var pad = (hi - lo) * 0.04m;
             hi += pad;
             lo -= pad;
 
-            var zones = _zones.Where(z => z.State != ZoneState.Mitigated).ToList();
-            var liquidity = _liquidity.ToList();
-            var structure = _structure.Where(e => e.Bar >= first).ToList();
+            var zones = model.Zones.Where(z => z.State != ZoneState.Mitigated).ToList();
+            var liquidity = model.Liquidity;
+            var structure = model.Structure.Where(e => e.Bar >= first).ToList();
             if (structure.Count > MaxStructureLabels)
                 structure = structure.Skip(structure.Count - MaxStructureLabels).ToList();
 
@@ -157,12 +209,12 @@ namespace ICTSMC
 
             // Time axis: ~6 labels.
             var tstep = Math.Max(1, count / 6);
-            var multiDay = GetCandle(last).Time.Date != GetCandle(first).Time.Date;
-            for (var b = first; b <= last; b += tstep)
+            var multiDay = view[count - 1].Time.Date != view[0].Time.Date;
+            for (var i = 0; i < count; i += tstep)
             {
-                var t = GetCandle(b).Time;
+                var t = view[i].Time;
                 var label = t.ToString(multiDay ? "dd MMM HH:mm" : "HH:mm", CultureInfo.InvariantCulture);
-                g.DrawString(label, fontSmall, grayBrush, X(b) - 20, plot.Bottom + 6);
+                g.DrawString(label, fontSmall, grayBrush, X(first + i) - 20, plot.Bottom + 6);
             }
 
             // Zones (under candles): HTF = thin frame, LTF = translucent fill.
@@ -175,7 +227,7 @@ namespace ICTSMC
                 var y1 = Math.Max(plot.Top, Y(Math.Min(z.Top, hi)));
                 var y2 = Math.Min(plot.Bottom, Y(Math.Max(z.Bottom, lo)));
                 var rect = new RectangleF(x1, y1, Math.Max(1f, xLive - x1), Math.Max(1f, y2 - y1));
-                var baseColor = ZoneColor(z);
+                var baseColor = ZoneColor(z.Type);
 
                 if (z.IsHtf)
                 {
@@ -206,19 +258,23 @@ namespace ICTSMC
             {
                 if (lq.Price > hi || lq.Price < lo || lq.StartBar > last)
                     continue;
-                if (lq.Swept && (!lq.WasTrap.HasValue || !lq.WasTrap.Value || last - (lq.SweptBar ?? last) > SweptRetentionBars))
+
+                var sweptAge = lq.HasSweptBar ? last - lq.SweptBar : 0;
+                if (lq.Swept && (!lq.WasTrap || sweptAge > SweptRetentionBars))
                     continue;
 
                 var color = lq.BuySide ? BslColor : SslColor;
                 var alpha = lq.Swept ? 70 : 170;
                 var y = Y(lq.Price);
                 var x1 = Math.Max(plot.Left, X(Math.Max(lq.StartBar, first)));
-                using var pen = new Pen(Color.FromArgb(alpha, color), 1) { DashStyle = DashStyle.Dash };
+                using var pen = new Pen(Color.FromArgb(alpha, color), lq.Emphasis ? 2 : 1) { DashStyle = DashStyle.Dash };
                 g.DrawLine(pen, x1, y, xLive, y);
 
-                var label = lq.Swept ? "Sweep" : lq.IsEqual ? (lq.BuySide ? "EQH·BSL" : "EQL·SSL") : lq.BuySide ? "BSL" : "SSL";
+                // The view's own label already distinguishes EQH/EQL pools from plain BSL/SSL
+                // and names session extremes (PDH/PDL/PWH/PWL), which the snapshot used to drop.
+                var label = lq.Swept ? "Sweep" : lq.Label;
                 using var lb = new SolidBrush(Color.FromArgb(alpha + 40, color));
-                g.DrawString(label, fontSmall, lb, Math.Max(x1, xLive - 60), lq.BuySide ? y - 15 : y + 2);
+                g.DrawString(label, fontSmall, lb, Math.Max(x1, xLive - 70), lq.BuySide ? y - 15 : y + 2);
             }
 
             // Structure: last few BoS/MSS as dashed level lines with labels.
@@ -241,10 +297,9 @@ namespace ICTSMC
             }
 
             // Equilibrium of the current dealing range.
-            var rangeOpt = GetDealingRange();
-            if (rangeOpt.HasValue)
+            if (model.HasRange)
             {
-                var eq = (rangeOpt.Value.High.Price + rangeOpt.Value.Low.Price) / 2m;
+                var eq = model.RangeEq;
                 if (eq < hi && eq > lo)
                 {
                     var y = Y(eq);
@@ -256,12 +311,12 @@ namespace ICTSMC
 
             // Candles on top.
             var bodyW = Math.Max(1f, bw * 0.62f);
-            for (var b = first; b <= last; b++)
+            for (var i = 0; i < count; i++)
             {
-                var c = GetCandle(b);
+                var c = view[i];
                 var bull = c.Close >= c.Open;
                 var color = bull ? BullStructureColor : BearStructureColor;
-                var x = X(b) + bw / 2f;
+                var x = X(first + i) + bw / 2f;
                 using var wick = new Pen(Color.FromArgb(200, color), 1);
                 g.DrawLine(wick, x, Y(c.High), x, Y(c.Low));
                 var yo = Y(c.Open);
@@ -273,7 +328,8 @@ namespace ICTSMC
             }
 
             // Live price tag.
-            var lastClose = GetCandle(last).Close;
+            var lastCandle = view[count - 1];
+            var lastClose = lastCandle.Close;
             var yLast = Y(lastClose);
             using (var tagBrush = new SolidBrush(Color.FromArgb(41, 98, 255)))
             using (var white = new SolidBrush(Color.White))
@@ -285,10 +341,11 @@ namespace ICTSMC
             }
 
             // Header.
-            var headerTime = GetCandle(last).Time.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+            var headerTime = lastCandle.Time.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+            var header = $"{HubName}  ·  {headerTime}";
             using (var headBrush = new SolidBrush(Color.FromArgb(225, 230, 236)))
-                g.DrawString($"{HubName}  ·  {headerTime}", fontHeader, headBrush, 10, 8);
-            g.DrawString(_htfInfo, fontSmall, grayBrush, 10 + g.MeasureString($"{HubName}  ·  {headerTime}", fontHeader).Width + 14, 11);
+                g.DrawString(header, fontHeader, headBrush, 10, 8);
+            g.DrawString(model.HtfInfo, fontSmall, grayBrush, 10 + g.MeasureString(header, fontHeader).Width + 14, 11);
 
             using var ms = new MemoryStream();
             bmp.Save(ms, ImageFormat.Png);
@@ -320,6 +377,22 @@ namespace ICTSMC
             EnsurePollers();
         }
 
+        /// <summary>
+        /// Drops a chart from the registry on teardown.
+        ///
+        /// Without this the hub relied entirely on the GC to notice a detached indicator, so
+        /// removing the last chart that used a bot token left that token's long-poll loop
+        /// running — issuing a getUpdates every 25 seconds — for the remaining life of the
+        /// ATAS process.
+        /// </summary>
+        public static void Unregister(ICTSMCStrategy indicator)
+        {
+            lock (Sync)
+                Instances.RemoveAll(w => !w.TryGetTarget(out var t) || ReferenceEquals(t, indicator));
+
+            EnsurePollers();
+        }
+
         internal static List<ICTSMCStrategy> Live()
         {
             lock (Sync)
@@ -340,23 +413,35 @@ namespace ICTSMC
                 .Distinct()
                 .ToList();
 
+            var toStart = new List<Poller>();
+            var toStop = new List<Poller>();
+
             lock (Sync)
             {
                 foreach (var token in tokens)
                 {
                     if (Pollers.ContainsKey(token))
                         continue;
+
                     var poller = new Poller(token);
                     Pollers[token] = poller;
-                    poller.Start();
+                    toStart.Add(poller);
                 }
 
                 foreach (var stale in Pollers.Keys.Where(k => !tokens.Contains(k)).ToList())
                 {
-                    Pollers[stale].Stop();
+                    toStop.Add(Pollers[stale]);
                     Pollers.Remove(stale);
                 }
             }
+
+            // Started and stopped OUTSIDE the lock: Poller.Charts() takes the same lock, so
+            // running cancellation callbacks or loop startup underneath it invited a stall.
+            foreach (var poller in toStop)
+                poller.Stop();
+
+            foreach (var poller in toStart)
+                poller.Start();
         }
 
         /// <summary>One getUpdates loop for one bot token.</summary>
@@ -370,55 +455,66 @@ namespace ICTSMC
 
             public void Start() => _ = Task.Run(LoopAsync);
 
-            public void Stop() => _cts.Cancel();
+            public void Stop()
+            {
+                try { _cts.Cancel(); }
+                catch (ObjectDisposedException) { /* already torn down */ }
+            }
 
             private List<ICTSMCStrategy> Charts() =>
                 Live().Where(i => i.HubToken == _token).ToList();
 
             private async Task LoopAsync()
             {
-                while (!_cts.IsCancellationRequested)
+                try
                 {
-                    try
+                    while (!_cts.IsCancellationRequested)
                     {
-                        if (Charts().Count == 0)
+                        try
                         {
-                            await Task.Delay(10000, _cts.Token).ConfigureAwait(false);
-                            continue;
+                            if (Charts().Count == 0)
+                            {
+                                await Task.Delay(10000, _cts.Token).ConfigureAwait(false);
+                                continue;
+                            }
+
+                            var url = $"https://api.telegram.org/bot{_token}/getUpdates" +
+                                      $"?timeout=25&offset={_offset}&allowed_updates=%5B%22message%22,%22callback_query%22%5D";
+                            var json = await Client.GetStringAsync(url, _cts.Token).ConfigureAwait(false);
+
+                            using var doc = JsonDocument.Parse(json);
+                            if (!doc.RootElement.TryGetProperty("result", out var result) ||
+                                result.ValueKind != JsonValueKind.Array)
+                                continue;
+
+                            foreach (var update in result.EnumerateArray())
+                            {
+                                _offset = update.GetProperty("update_id").GetInt64() + 1;
+                                try
+                                {
+                                    Handle(update);
+                                }
+                                catch
+                                {
+                                    // One malformed update must not kill the loop.
+                                }
+                            }
                         }
-
-                        var url = $"https://api.telegram.org/bot{_token}/getUpdates" +
-                                  $"?timeout=25&offset={_offset}&allowed_updates=%5B%22message%22,%22callback_query%22%5D";
-                        var json = await Client.GetStringAsync(url, _cts.Token).ConfigureAwait(false);
-
-                        using var doc = JsonDocument.Parse(json);
-                        if (!doc.RootElement.TryGetProperty("result", out var result) ||
-                            result.ValueKind != JsonValueKind.Array)
-                            continue;
-
-                        foreach (var update in result.EnumerateArray())
+                        catch (OperationCanceledException)
                         {
-                            _offset = update.GetProperty("update_id").GetInt64() + 1;
-                            try
-                            {
-                                Handle(update);
-                            }
-                            catch
-                            {
-                                // One malformed update must not kill the loop.
-                            }
+                            break;
+                        }
+                        catch
+                        {
+                            // Network error / 409 (another poller) / bad token: back off.
+                            try { await Task.Delay(15000, _cts.Token).ConfigureAwait(false); }
+                            catch { break; }
                         }
                     }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
-                    catch
-                    {
-                        // Network error / 409 (another poller) / bad token: back off.
-                        try { await Task.Delay(15000, _cts.Token).ConfigureAwait(false); }
-                        catch { break; }
-                    }
+                }
+                finally
+                {
+                    _cts.Dispose();
                 }
             }
 
@@ -442,9 +538,14 @@ namespace ICTSMC
                 }
                 else if (update.TryGetProperty("callback_query", out var callback))
                 {
-                    var callbackId = callback.GetProperty("id").GetString();
-                    var chatId = callback.GetProperty("message").GetProperty("chat").GetProperty("id")
-                        .GetInt64().ToString(CultureInfo.InvariantCulture);
+                    var callbackId = callback.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
+
+                    // Callbacks on inline messages carry no "message" object at all.
+                    if (!callback.TryGetProperty("message", out var msg) ||
+                        !msg.TryGetProperty("chat", out var chat))
+                        return;
+
+                    var chatId = chat.GetProperty("id").GetInt64().ToString(CultureInfo.InvariantCulture);
                     var data = callback.TryGetProperty("data", out var d) ? d.GetString() ?? "" : "";
 
                     _ = PostAsync("answerCallbackQuery", new Dictionary<string, string>
@@ -478,16 +579,25 @@ namespace ICTSMC
 
             private void SendChartKeyboard(string chatId, List<ICTSMCStrategy> charts)
             {
-                var buttons = charts
-                    .OrderBy(c => c.HubName)
-                    .Select(c => $"[{{\"text\":\"📸 {c.HubName}\",\"callback_data\":\"shot:{c.HubKey}\"}}]");
-                var markup = "{\"inline_keyboard\":[" + string.Join(",", buttons) + "]}";
+                // Serialized rather than concatenated: HubName carries the instrument alias,
+                // and a quote or backslash in it used to produce malformed JSON that Telegram
+                // silently rejected, so the keyboard simply never appeared.
+                var keyboard = new
+                {
+                    inline_keyboard = charts
+                        .OrderBy(c => c.HubName, StringComparer.Ordinal)
+                        .Select(c => new[]
+                        {
+                            new { text = $"📸 {c.HubName}", callback_data = $"shot:{c.HubKey}" }
+                        })
+                        .ToArray()
+                };
 
                 _ = PostAsync("sendMessage", new Dictionary<string, string>
                 {
                     ["chat_id"] = chatId,
                     ["text"] = "📸 Select a chart:",
-                    ["reply_markup"] = markup
+                    ["reply_markup"] = JsonSerializer.Serialize(keyboard)
                 });
             }
 

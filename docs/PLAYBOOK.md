@@ -778,10 +778,15 @@ quality — does touch #2 reject or break through? — is measurable from the da
 - Killzone times are **platform-local**. The indicator measures the bar timeframe from
   the data but cannot know your platform's timezone, which is why the killzone filter
   ships off: set `KillzoneWindows` to your chart's clock first.
-- The trap-arm budget bounds the ping-pong but there is still **no explicit
-  chop/consolidation detector**. In a genuinely rangebound market the model will produce
-  fewer signals than before, not zero — the killzone filter is the practical second
-  line of defence.
+- There is still **no explicit chop/consolidation detector**. The trap-arm budget bounds
+  the ping-pong, and `RequireDisplacementForMss` now stops a range oscillation from counting
+  as a structural shift at all — which is the larger of the two effects, because the budget
+  never constrained arming via a genuine `Sweep`. In a rangebound market the model will
+  produce far fewer signals than before, but not zero; the killzone filter remains the
+  practical third line of defence.
+- **Killzone times are quantised to the tick, not the bar** — but they are still
+  platform-local, and the indicator cannot know your platform's timezone. Set
+  `KillzoneWindows` to your chart's clock before enabling the filter.
 - `Nullable` is left disabled project-wide. Null-safety here is by convention and
   reviewed by hand, not enforced by the compiler.
 - The first HTF candle of loaded history can be partial if the history starts
@@ -789,7 +794,16 @@ quality — does touch #2 reject or break through? — is measurable from the da
 - An HTF candle is only known to be closed once the first chart candle of the NEXT bucket
   arrives, so HTF zones become available one chart bar after the HTF close. Unavoidable
   without guessing at an unfinished candle, and preferable to a zone that repaints.
-- Historical outcomes cannot resolve intrabar sequencing — see the journal caveat above.
+- Historical outcomes cannot resolve intrabar sequencing, and are now explicit about it.
+  A live signal fires on a tick, so the developing candle's extremes at that instant
+  separate pre-entry price action from post-entry exposure. In replay no such split exists —
+  the candle handed to the intrabar engine is already complete — so a replayed signal treats
+  the **whole signal bar** as its exposure and resolves it stop-first, and its row is tagged
+  `bar-conservative` in the `Sequenced` column. Previously both marks were set to the
+  completed candle's own extremes, which made "excursion beyond them" empty by construction:
+  the signal bar contributed no MAE, no MFE and no stop-out, so tap-and-fail — the dominant
+  failure mode of a zone-touch entry — resolved later as a timeout or even a win. `HIST` and
+  `LIVE` rows are now comparable, but they are not identical measurements; the column says which.
 - Synthetic HTF candles are built from loaded chart bars — load enough history for the
   Daily/Weekly layers to be meaningful.
 - The entry alert is a *setup detector with a plan*, not an auto-trader: the final
