@@ -1126,6 +1126,7 @@ namespace ICTSMC
             _candlesView = new List<CandleView>();
             _candlesFirstBar = 0;
             _killzonesParsedFrom = null;
+            _renderErrorLogged = false;
             InitJournalSession();
         }
 

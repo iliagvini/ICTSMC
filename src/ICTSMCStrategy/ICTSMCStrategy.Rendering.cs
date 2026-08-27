@@ -39,6 +39,9 @@ namespace ICTSMC
         // ever touched from the drawing thread.
         private readonly Dictionary<(int Argb, int Width, DashStyle Dash), RenderPen> _penCache = new();
 
+        /// <summary>One-shot latch so a permanent render fault is recorded once, not per frame.</summary>
+        private bool _renderErrorLogged;
+
         private RenderPen GetPen(Color color, int width = 1, DashStyle dash = DashStyle.Solid)
         {
             var key = (color.ToArgb(), width, dash);
@@ -90,9 +93,31 @@ namespace ICTSMC
                 if (HtfEnabled && ShowHtfInfoBadge)
                     RenderHtfBadge(context, region, model);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 // Drop the frame; the next one redraws from a fresh snapshot.
+                //
+                // But a throw here is usually PERMANENT, not transient — a bad setting
+                // combination reaches the same line on every frame — and the catch made that
+                // indistinguishable from "there is nothing to draw". Worse, layers render in
+                // sequence, so a fault part-way through leaves the earlier ones on screen and
+                // silently removes the rest. The first fault is therefore recorded.
+                if (!_renderErrorLogged)
+                {
+                    _renderErrorLogged = true;
+
+                    try
+                    {
+                        JournalEventAt(model.HasLiveCandle ? model.LiveCandle.Time : DateTime.Now,
+                            "RenderFailed", "", null, 0m,
+                            $"{ex.GetType().Name}: {ex.Message} — every chart layer after the " +
+                            "failure point was not drawn this frame");
+                    }
+                    catch
+                    {
+                        // Diagnostics must never themselves break the drawing thread.
+                    }
+                }
             }
         }
 
@@ -128,9 +153,16 @@ namespace ICTSMC
                 return pool.ToList();
 
             var price = model.LastClose;
-            var budget = model.Atr > 0 && ZoneVisibilityAtrRange > 0
-                ? model.Atr * ZoneVisibilityAtrRange
-                : decimal.MaxValue;
+
+            // "No distance limit" is carried as a FLAG, never as a sentinel value.
+            // Using decimal.MaxValue as the budget meant the HTF branch below computed
+            // decimal.MaxValue * 2, which overflows — and because OnRender's catch-all
+            // swallows the throw, every layer after this one (zones, liquidity, structure,
+            // the HTF badge) silently stopped drawing while premium/discount, rendered
+            // earlier in the frame, kept working. A chart showing only EQ and OTE was the
+            // visible symptom.
+            var unlimited = ZoneVisibilityAtrRange <= 0 || model.Atr <= 0;
+            var budget = unlimited ? 0m : model.Atr * ZoneVisibilityAtrRange;
 
             decimal Distance(ZoneView z) => z.Contains(price)
                 ? 0m
@@ -139,7 +171,7 @@ namespace ICTSMC
             var candidates = pool
                 .Where(z => z.State != ZoneState.Mitigated)
                 .Select(z => (Zone: z, Dist: Distance(z)))
-                .Where(t => t.Dist <= (t.Zone.IsHtf ? budget * 2 : budget))
+                .Where(t => unlimited || t.Dist <= (t.Zone.IsHtf ? budget * 2 : budget))
                 .ToList();
 
             var visible = new List<ZoneView>();
