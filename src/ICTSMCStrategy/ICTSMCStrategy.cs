@@ -52,6 +52,11 @@ namespace ICTSMC
         private readonly List<LiquidityLevel> _liquidity = new();
         private readonly List<StructureEvent> _structure = new();
 
+        // Order blocks whose magnitude proof passed but whose imbalance proof needs one more
+        // candle before it can be judged. See PendingOrderBlock.
+        private readonly List<PendingOrderBlock> _pendingOrderBlocks = new();
+        private readonly List<PendingHtfOrderBlock> _pendingHtfOrderBlocks = new();
+
         // HTF engine
         private readonly List<HtfAggregator> _htfAggregators = new();
         private readonly Dictionary<long, int> _barDeltaCounts = new(); // delta seconds -> occurrences
@@ -551,6 +556,45 @@ namespace ICTSMC
             set => Set(ref _dealingRangeFromLeg, value);
         }
 
+        private int _minDealingRangeBars = 5;
+
+        /// <summary>
+        /// Shortest impulse leg, in bars, that may define the dealing range (0 = no guard).
+        ///
+        /// The leg is re-anchored on every structure break, and a break that follows hard on
+        /// the heels of the extreme produces a leg one or two bars long. Field journals show
+        /// exactly that: spans of 1 and 3 bars, and range heights swinging between 7.9 and
+        /// 258 points on the same instrument. Everything downstream inherits the distortion —
+        /// equilibrium, the premium/discount verdict, the PD tolerance band (a percentage OF
+        /// that range, so it collapsed to well under a point) and the OTE pocket. One logged
+        /// entry was vetoed by 0.2 points against an equilibrium derived from a single candle.
+        ///
+        /// A leg that fails this guard is not discarded — the dealing range simply falls back
+        /// to the last confirmed swing pair, which is what the engine used before leg
+        /// anchoring existed, and the OTE band reports "no band" rather than a fictitious one.
+        /// </summary>
+        [Display(GroupName = GrpPd, Name = "Min dealing-range leg (bars, 0 = off)", Order = 609)]
+        [Range(0, 200)]
+        public int MinDealingRangeBars
+        {
+            get => _minDealingRangeBars;
+            set => Set(ref _minDealingRangeBars, Math.Clamp(value, 0, 200));
+        }
+
+        private decimal _minDealingRangeAtr = 1.5m;
+
+        /// <summary>
+        /// Shortest impulse leg, as a multiple of ATR, that may define the dealing range
+        /// (0 = no guard). The bar-span guard alone lets a long but flat drift through.
+        /// </summary>
+        [Display(GroupName = GrpPd, Name = "Min dealing-range height (ATR ×, 0 = off)", Order = 610)]
+        [Range(0, 20)]
+        public decimal MinDealingRangeAtr
+        {
+            get => _minDealingRangeAtr;
+            set => Set(ref _minDealingRangeAtr, Math.Clamp(value, 0m, 20m));
+        }
+
         [Display(GroupName = GrpPd, Name = "Show OTE band (0.618–0.79)", Order = 612)]
         public bool ShowOte { get; set; } = true;
 
@@ -716,8 +760,21 @@ namespace ICTSMC
         [Display(GroupName = GrpHtf, Name = "HTF structure lookback (legacy — unused)", Order = 742)]
         public int HtfStructureLookback { get; set; } = 5;
 
-        [Display(GroupName = GrpHtf, Name = "HTF zone border color", Order = 745)]
+        // Kept under its original property name so charts saved against an earlier build
+        // still bind the colour they were customised with; it now means the BULLISH frame,
+        // and its default is the same gold as before.
+        [Display(GroupName = GrpHtf, Name = "HTF bullish zone border", Order = 745)]
         public Color HtfBorderColor { get; set; } = Color.FromArgb(0xFF, 0xD4, 0xAF, 0x37);
+
+        /// <summary>
+        /// Bearish HTF frames. Previously every HTF zone drew in one gold, so a 4H FVG above
+        /// price looked identical to one below it — and unlike chart-timeframe zones, which
+        /// are filled in their family's bull/bear colour, a frame gave no other cue. Bronze
+        /// stays in the same metallic family as the gold, so HTF zones still read as a set,
+        /// while being unmistakably the other direction.
+        /// </summary>
+        [Display(GroupName = GrpHtf, Name = "HTF bearish zone border", Order = 746)]
+        public Color HtfBearBorderColor { get; set; } = Color.FromArgb(0xFF, 0xC0, 0x70, 0x3A);
 
         private int _maxHtfZones = 12;
         [Display(GroupName = GrpHtf, Name = "Max HTF zones per layer", Order = 750)]
@@ -1077,6 +1134,8 @@ namespace ICTSMC
             _swingLows.Clear();
             _liquidity.Clear();
             _structure.Clear();
+            _pendingOrderBlocks.Clear();
+            _pendingHtfOrderBlocks.Clear();
             _htfAggregators.Clear();
             _barDeltaCounts.Clear();
             _barDeltaSamples.Clear();

@@ -68,6 +68,20 @@ the chart must never change what the strategy does. The same holds for `ShowOb`.
   is clamped so the window ending at the break bar is always examined, which also covers
   a leg that is a single engulfing candle. The identical rule runs on the HTF series
   (`HtfLegHasImbalance`), so the two layers cannot disagree.
+
+  **And when the gap has not formed yet, the proof is held over one candle**
+  (`ResolvePendingOrderBlocks`, `ResolvePendingHtfOrderBlocks`). Widening the window was
+  necessary but not sufficient: when the displacement *is* the breaking candle, the imbalance
+  it leaves spans `[break-1, break, break+1]`, so at the moment structure breaks it does not
+  exist and no scan can find it. Field journals showed the cost — 11 of 12 rejections had the
+  block one or two candles before the break, roughly 46% of all candidates discarded. The
+  block is therefore parked rather than refused, and re-tested once the next candle closes:
+  one chart candle for chart-TF blocks, one candle *of that layer* for HTF blocks. Magnitude
+  is still decided immediately, because it is fully determined at the break and cannot
+  improve — and a magnitude failure now journals rather than returning silently. Held-over
+  blocks that qualify journal as `ObConfirmed`. HTF candidates are keyed by first-chart-bar
+  rather than buffer index, so a trim between break and re-test cannot mis-resolve them.
+  The cost, accepted deliberately: an order block can now appear one bar after its break.
 - zone = open↔close body (default, as taught) or full range (`ObStyle`).
 
 **Breaker blocks** (`Detection.cs → ApplyBodyCloseMitigation`, toggle
@@ -117,7 +131,17 @@ broken, or when the new pivot is more extreme.
 Dealing range = the **current impulse leg** (origin extreme ↔ running extreme,
 re-anchored on every BoS/MSS — `Detection.cs → AnchorLeg`; toggle
 `DealingRangeFromLeg`), falling back to the last confirmed swing pair before the
-first break. `EQ 50%` line plus optional premium/discount shading
+first break — **or whenever the leg is too small to mean anything**
+(`Intrabar.cs → LegIsUsableAsRange`, `MinDealingRangeBars` 5, `MinDealingRangeAtr` 1.5×).
+The leg re-anchors on every structure break, so a break that lands right after the extreme
+produces a leg one or two bars long, and everything downstream inherits the distortion:
+equilibrium, the premium/discount verdict, the PD tolerance band — which is a *percentage of
+that range*, so it collapsed to well under a point — and the OTE pocket. Field journals show
+spans of 1 and 3 bars and heights swinging between 7.9 and 258 points on one instrument, with
+an entry vetoed by 0.2 points against an EQ derived from a single candle. A leg that fails the
+guard is not discarded; the range simply falls back to the confirmed swing pair, the OTE band
+reports no band rather than a fictitious one, and the `RangeAnchored` row records which range
+was actually used. `EQ 50%` line plus optional premium/discount shading
 (`Rendering.cs → RenderPremiumDiscount`). With `EntryNeedsPdAlignment` on, long signals
 only fire from zones whose midpoint sits at or below equilibrium, shorts at or above.
 

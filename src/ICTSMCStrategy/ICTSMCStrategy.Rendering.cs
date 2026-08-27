@@ -125,10 +125,28 @@ namespace ICTSMC
         /// Small badge in the chart corner showing the measured chart timeframe and
         /// the HTF layer(s) in use — so the auto selection is always verifiable at a glance.
         /// </summary>
+        /// <summary>
+        /// Vertical offset of the HTF badge from the top of the chart region. Platforms paint
+        /// their own attribution watermark ("Trading Platform by …") along the very top of the
+        /// same area, and at +8 the badge landed straight in it — legible only in fragments,
+        /// which matters because the badge is the fastest check that detection is healthy.
+        /// </summary>
+        private const int HtfBadgeTopOffset = 28;
+
         private void RenderHtfBadge(RenderContext context, Rectangle region, RenderModel model)
         {
             var text = string.IsNullOrEmpty(model.HtfInfo) ? "HTF: measuring chart timeframe…" : model.HtfInfo;
-            context.DrawString(text, ZoneFont, Color.FromArgb(190, 200, 200, 200), region.Left + 10, region.Top + 8);
+
+            var x = region.Left + 10;
+            var y = region.Top + HtfBadgeTopOffset;
+            var size = context.MeasureString(text, ZoneFont);
+
+            // Same translucent backdrop the zone labels use, so the badge stays readable
+            // over candles and over anything the platform draws underneath it.
+            context.FillRectangle(Color.FromArgb(LabelBackdropAlpha, 14, 17, 22),
+                new Rectangle(x - 4, y - 2, size.Width + 8, size.Height + 4));
+
+            context.DrawString(text, ZoneFont, Color.FromArgb(205, 200, 200, 200), x, y);
         }
 
         #region Zones
@@ -225,8 +243,8 @@ namespace ICTSMC
                 {
                     // HTF zones are frames, not fills — they outline confluence
                     // without stacking paint over the LTF zones inside them. The
-                    // heavier 2px stroke and the dedicated hue both mark them as HTF.
-                    context.DrawRectangle(GetPen(Color.FromArgb(220, HtfBorderColor), 2), rect);
+                    // heavier 2px stroke marks them as HTF; the hue marks the side.
+                    context.DrawRectangle(GetPen(Color.FromArgb(220, HtfColor(zone.IsBullish)), 2), rect);
                 }
                 else
                 {
@@ -274,7 +292,7 @@ namespace ICTSMC
             context.FillRectangle(Color.FromArgb(LabelBackdropAlpha, 14, 17, 22),
                 new Rectangle(textX - 3, textY - 1, size.Width + 6, size.Height + 2));
 
-            var labelColor = zone.IsHtf ? HtfBorderColor : baseColor;
+            var labelColor = zone.IsHtf ? HtfColor(zone.IsBullish) : baseColor;
             context.DrawString(zone.Tag, ZoneFont, Color.FromArgb(240, labelColor), textX, textY);
         }
 
@@ -310,6 +328,9 @@ namespace ICTSMC
                 Math.Min(y - size.Height / 2, region.Bottom - size.Height - 1));
             context.DrawString(text, StructureFont, textColor, textX, textY);
         }
+
+        /// <summary>Frame colour for an HTF zone — metallic either way, directional by hue.</summary>
+        private Color HtfColor(bool bullish) => bullish ? HtfBorderColor : HtfBearBorderColor;
 
         private Color ZoneColor(ZoneType type) => type switch
         {

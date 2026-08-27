@@ -166,8 +166,6 @@ namespace ICTSMC
         {
             get
             {
-                // No direction glyphs: side is already conveyed by color and by the
-                // zone sitting above (resistance) or below (support) price.
                 var core = Type switch
                 {
                     ZoneType.BullOrderBlock or ZoneType.BearOrderBlock => "OB",
@@ -175,7 +173,20 @@ namespace ICTSMC
                     ZoneType.BullBreaker or ZoneType.BearBreaker => "BRK",
                     _ => "iFVG"
                 };
-                return IsHtf ? $"{(string.IsNullOrEmpty(HtfLabel) ? "HTF" : HtfLabel)} {core}" : core;
+
+                if (!IsHtf)
+                {
+                    // Chart-timeframe zones are drawn as filled rectangles in their family's
+                    // own bull/bear colour, so the side is already unmistakable.
+                    return core;
+                }
+
+                // HTF zones are drawn as FRAMES, and every frame used to be the same gold —
+                // so "colour conveys the side" was simply untrue for them, and a 4H FVG above
+                // price was indistinguishable from one below it. They now carry both a
+                // directional border colour and this glyph.
+                var layer = string.IsNullOrEmpty(HtfLabel) ? "HTF" : HtfLabel;
+                return $"{layer} {core} {(IsBullish ? "▲" : "▼")}";
             }
         }
 
@@ -188,6 +199,44 @@ namespace ICTSMC
         public decimal Price;
         /// <summary>Set once structure broke through this swing (used for BoS/MSS bookkeeping).</summary>
         public bool Broken;
+    }
+
+    /// <summary>
+    /// An order block whose magnitude proof passed but whose imbalance proof could not yet
+    /// be evaluated, held over for exactly one more candle.
+    ///
+    /// When the displacement IS the breaking candle — the canonical shape — the gap it
+    /// leaves spans (break-1, break, break+1) and therefore does not exist at the moment
+    /// structure breaks. Judging the imbalance there rejected the cleanest setup in the
+    /// book: in field journals 11 of 12 rejections had the order block one or two candles
+    /// before the break, and roughly 46% of all candidates were being discarded.
+    /// </summary>
+    internal sealed class PendingOrderBlock
+    {
+        public int ObBar;
+        public int BreakBar;
+        public bool Bullish;
+        public decimal Top;
+        public decimal Bottom;
+        public decimal Impulse;
+        public decimal Required;
+    }
+
+    /// <summary>
+    /// The HTF counterpart of <see cref="PendingOrderBlock"/>.
+    ///
+    /// Candles are identified by their FIRST CHART BAR rather than by their index into the
+    /// layer's buffer: that buffer is trimmed at 400 candles, which shifts every index, so
+    /// an index stored across a candle boundary cannot be trusted.
+    /// </summary>
+    internal sealed class PendingHtfOrderBlock
+    {
+        public string Layer;
+        public int ObFirstChartBar;
+        public int BreakFirstChartBar;
+        public bool Bullish;
+        public decimal Top;
+        public decimal Bottom;
     }
 
     internal sealed class LiquidityLevel
