@@ -70,6 +70,13 @@ toggle:
 
 **From the code audit (this build):**
 
+- **Canonical order blocks are no longer rejected.** The imbalance scan started two
+  candles after the order block, so the window that straddles the OB itself — the gap
+  left by *last opposite candle, then one explosive candle* — was never examined. Whenever
+  the OB sat immediately before the breaking candle the scan ran zero times and the most
+  textbook shape in the book was journaled as "drift, not displacement". Expect **more**
+  order blocks, and specifically the good ones; the gapless grind this filter exists to
+  reject is still rejected. Same fix on the HTF series.
 - **An MSS must displace** (`RequireDisplacementForMss`, **on**) — "MSS" previously meant
   nothing more than *this break went the other way to the last one*, so in a range every
   oscillation between the same two extremes armed the entry model. A reversal break now

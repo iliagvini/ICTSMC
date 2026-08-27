@@ -56,6 +56,18 @@ the chart must never change what the strategy does. The same holds for `ShowOb`.
   not displacement — without this a 15-bar grind covering 1.5 × ATR passed exactly like
   one violent candle, and a *longer* lookback made the filter *easier*, which is
   backwards. Rejections are journaled as `ObRejected`.
+
+  Which windows count is decided by `Detection.cs → ImbalanceScanStart`, and it matters.
+  A three-candle window ending at bar `b` spans `[b-2, b]`, so the window ending one
+  candle after the order block **straddles the OB itself** — which is exactly where the
+  gap sits in the textbook shape: the last opposite candle, then one explosive candle
+  whose low opens clear of the high before it. The scan used to start two candles after
+  the OB and therefore skipped that window entirely, so whenever the order block sat
+  immediately before the breaking candle the loop ran zero times and the most canonical
+  OB in the book was rejected as drift. The scan now starts at the leg's first candle and
+  is clamped so the window ending at the break bar is always examined, which also covers
+  a leg that is a single engulfing candle. The identical rule runs on the HTF series
+  (`HtfLegHasImbalance`), so the two layers cannot disagree.
 - zone = open↔close body (default, as taught) or full range (`ObStyle`).
 
 **Breaker blocks** (`Detection.cs → ApplyBodyCloseMitigation`, toggle

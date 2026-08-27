@@ -402,13 +402,7 @@ namespace ICTSMC
 
             impulse = bullish ? close - originPrice : originPrice - close;
             required = _atr * DisplacementAtrFactor;
-
-            // The scan must always reach the break bar's OWN three-candle window. When the
-            // leg's origin IS the break bar (a single engulfing candle that both made the
-            // low and closed through the protected high — the most violent displacement
-            // there is) a scan starting at origin+2 examines nothing at all and would report
-            // "no imbalance" for the clearest possible case.
-            hasImbalance = LegHasImbalance(Math.Max(0, Math.Min(originBar, breakBar - 2)), breakBar, bullish);
+            hasImbalance = LegHasImbalance(originBar, breakBar, bullish);
 
             if (_atr > 0 && impulse < required)
                 return false;
@@ -572,8 +566,10 @@ namespace ICTSMC
                 if (RequireImbalanceForOb && !LegHasImbalance(i, breakBar, bullish))
                 {
                     JournalEvent(breakBar, "ObRejected", bullish ? "Bull" : "Bear", null, breakClose,
-                        $"no imbalance in the displacement leg (bars {i}-{breakBar}); distance {Num(impulse)} " +
-                        $"vs ATR×{DisplacementAtrFactor} = {Num(_atr * DisplacementAtrFactor)} — drift, not displacement");
+                        $"no imbalance in the displacement leg (OB bar {i}, break bar {breakBar}; " +
+                        $"gap windows ending {ImbalanceScanStart(i, breakBar)}-{breakBar} all checked); " +
+                        $"distance {Num(impulse)} vs ATR×{DisplacementAtrFactor} = " +
+                        $"{Num(_atr * DisplacementAtrFactor)} — drift, not displacement");
                     return;
                 }
 
@@ -601,15 +597,38 @@ namespace ICTSMC
         }
 
         /// <summary>
+        /// First three-candle window an imbalance scan examines for a displacement leg
+        /// running from <paramref name="legStartBar"/> to <paramref name="breakBar"/>.
+        ///
+        /// The scan starts at the leg's FIRST candle, not its second. A window ending at
+        /// bar <c>b</c> spans <c>[b-2, b]</c>, so the window ending at <c>legStart + 1</c>
+        /// straddles the leg's opening candle — and that is precisely where an order
+        /// block's own gap sits: the OB candle, then one explosive candle whose low opens
+        /// clear of the high before the OB. Starting at <c>legStart + 2</c> skipped that
+        /// window, so whenever the order block sat immediately before the breaking candle
+        /// the loop ran zero times and the most textbook OB shape in the book was rejected
+        /// as "drift, not displacement".
+        ///
+        /// The result is also clamped so the window ending at the break bar is ALWAYS
+        /// examined. A leg can be a single engulfing candle that is itself the whole move;
+        /// it must be judged on the gap it left rather than not judged at all.
+        /// </summary>
+        private static int ImbalanceScanStart(int legStartBar, int breakBar)
+        {
+            var from = legStartBar + 1;
+            return from > breakBar ? breakBar : from;
+        }
+
+        /// <summary>
         /// True when the leg between the order-block candle and the break contains a
         /// 3-candle imbalance in the direction of the move — the footprint of real
-        /// displacement.
+        /// displacement. See <see cref="ImbalanceScanStart"/> for which windows count.
         /// </summary>
         private bool LegHasImbalance(int obBar, int breakBar, bool bullish)
         {
             var minGap = MinFvgTicks * InstrumentTickSize;
 
-            for (var b = obBar + 2; b <= breakBar; b++)
+            for (var b = ImbalanceScanStart(obBar, breakBar); b <= breakBar; b++)
             {
                 if (b - 2 < 0)
                     continue;
@@ -942,7 +961,7 @@ namespace ICTSMC
         {
             var minGap = MinFvgTicks * InstrumentTickSize;
 
-            for (var b = obIndex + 2; b <= lastIndex; b++)
+            for (var b = ImbalanceScanStart(obIndex, lastIndex); b <= lastIndex; b++)
             {
                 if (b - 2 < 0)
                     continue;
